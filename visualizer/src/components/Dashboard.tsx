@@ -107,9 +107,21 @@ export function Dashboard() {
     return () => clearInterval(intervalId);
   }, [logFiles, selectedLog, uploadedFiles]);
 
-  const handleFileLoaded = useCallback((fileName: string, content: string) => {
-    // Store the raw content for future reloads
+  const handleFileLoaded = useCallback(async (fileName: string, content: string) => {
+    // Store the raw content in state for immediate use
     setUploadedFiles(prev => ({ ...prev, [fileName]: content }));
+    
+    // Also save to disk so it can be re-fetched later
+    try {
+      const formData = new FormData();
+      formData.append('file', new File([content], fileName, { type: 'application/json' }));
+      await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+      });
+    } catch (e) {
+      console.error('Failed to save file to disk:', e);
+    }
     
     const parsed = parseLogFile(fileName, content);
     setLogFiles(prev => {
