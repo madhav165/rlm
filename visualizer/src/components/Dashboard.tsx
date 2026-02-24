@@ -57,6 +57,18 @@ async function loadDemoLogs(
   }
 }
 
+async function reloadLogFile(fileName: string) {
+  try {
+    const response = await fetch(`/logs/${fileName}`);
+    if (!response.ok) throw new Error('Failed to reload log');
+    const content = await response.text();
+    return parseLogFile(fileName, content);
+  } catch (e) {
+    console.error(`Failed to reload log file ${fileName}:`, e);
+    return null;
+  }
+}
+
 export function Dashboard() {
   const [logFiles, setLogFiles] = useState<RLMLogFile[]>([]);
   const [selectedLog, setSelectedLog] = useState<RLMLogFile | null>(null);
@@ -68,14 +80,25 @@ export function Dashboard() {
     loadDemoLogs(setDemoLogs, setLoadingDemos);
   }, []);
 
-  // Auto-reload polling - refresh demo logs every 5 seconds
+  // Auto-reload polling - refresh demo logs and loaded logs every 5 seconds
   useEffect(() => {
     const intervalId = setInterval(() => {
       loadDemoLogs(setDemoLogs, setLoadingDemos);
+      // Also reload any loaded log files to keep them up to date
+      logFiles.forEach(log => {
+        reloadLogFile(log.fileName).then(updatedLog => {
+          if (updatedLog) {
+            setLogFiles(prev => prev.map(f => f.fileName === log.fileName ? updatedLog : f));
+            if (selectedLog?.fileName === log.fileName) {
+              setSelectedLog(updatedLog);
+            }
+          }
+        });
+      });
     }, 5000);
 
     return () => clearInterval(intervalId);
-  }, []);
+  }, [logFiles, selectedLog]);
 
   const handleFileLoaded = useCallback((fileName: string, content: string) => {
     const parsed = parseLogFile(fileName, content);
@@ -88,15 +111,7 @@ export function Dashboard() {
     setSelectedLog(parsed);
   }, []);
 
-  // Auto-reload also refreshes the currently selected log if it's in the loaded files
-  useEffect(() => {
-    if (selectedLog) {
-      const currentLog = logFiles.find(f => f.fileName === selectedLog.fileName);
-      if (currentLog) {
-        setSelectedLog(currentLog);
-      }
-    }
-  }, [logFiles, selectedLog]);
+
 
   const loadDemoLog = useCallback(async (fileName: string) => {
     try {
