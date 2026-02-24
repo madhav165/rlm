@@ -68,6 +68,15 @@ export function Dashboard() {
     loadDemoLogs(setDemoLogs, setLoadingDemos);
   }, []);
 
+  // Auto-reload polling - refresh demo logs every 5 seconds
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      loadDemoLogs(setDemoLogs, setLoadingDemos);
+    }, 5000);
+
+    return () => clearInterval(intervalId);
+  }, []);
+
   const handleFileLoaded = useCallback((fileName: string, content: string) => {
     const parsed = parseLogFile(fileName, content);
     setLogFiles(prev => {
