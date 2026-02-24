@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
 interface FileUploaderProps {
-  onFileLoaded: (fileName: string, content: string) => void;
+  onFileLoaded: (fileName: string, content: string, path?: string) => void;
 }
 
 export function FileUploader({ onFileLoaded }: FileUploaderProps) {
@@ -22,7 +22,9 @@ export function FileUploader({ onFileLoaded }: FileUploaderProps) {
     setIsLoading(true);
     try {
       const content = await file.text();
-      onFileLoaded(file.name, content);
+      // Try to get the file path (webkitRelativePath includes the path in some browsers)
+      const filePath = (file as any).path || (file as any).webkitRelativePath || undefined;
+      onFileLoaded(file.name, content, filePath);
     } catch (error) {
       console.error('Error reading file:', error);
       alert('Failed to read file');

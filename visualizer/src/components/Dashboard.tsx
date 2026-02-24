@@ -57,8 +57,25 @@ async function loadDemoLogs(
   }
 }
 
-async function reloadLogFile(fileName: string, uploadedFiles: Record<string, string>) {
-  // If this is an uploaded file, use the stored content
+async function reloadLogFile(
+  fileName: string, 
+  uploadedFiles: Record<string, string>,
+  filePaths: Record<string, string>
+) {
+  // If this is an uploaded file with original path, read from original location
+  if (filePaths[fileName]) {
+    try {
+      const response = await fetch(`/api/file?path=${encodeURIComponent(filePaths[fileName])}`);
+      if (!response.ok) throw new Error('Failed to reload file');
+      const { content } = await response.json();
+      return parseLogFile(fileName, content);
+    } catch (e) {
+      console.error(`Failed to reload file ${fileName} from ${filePaths[fileName]}:`, e);
+      return null;
+    }
+  }
+  
+  // If stored in uploadedFiles, use that
   if (uploadedFiles[fileName]) {
     return parseLogFile(fileName, uploadedFiles[fileName]);
   }
@@ -81,6 +98,7 @@ export function Dashboard() {
   const [demoLogs, setDemoLogs] = useState<DemoLogInfo[]>([]);
   const [loadingDemos, setLoadingDemos] = useState(true);
   const [uploadedFiles, setUploadedFiles] = useState<Record<string, string>>({});
+  const [filePaths, setFilePaths] = useState<Record<string, string>>({});
 
   // Load demo log previews on mount - fetches latest 10 from API
   useEffect(() => {
@@ -93,7 +111,7 @@ export function Dashboard() {
       loadDemoLogs(setDemoLogs, setLoadingDemos);
       // Also reload any loaded log files to keep them up to date
       logFiles.forEach(log => {
-        reloadLogFile(log.fileName, uploadedFiles).then(updatedLog => {
+        reloadLogFile(log.fileName, uploadedFiles, filePaths).then(updatedLog => {
           if (updatedLog) {
             setLogFiles(prev => prev.map(f => f.fileName === log.fileName ? updatedLog : f));
             if (selectedLog?.fileName === log.fileName) {
@@ -105,22 +123,27 @@ export function Dashboard() {
     }, 5000);
 
     return () => clearInterval(intervalId);
-  }, [logFiles, selectedLog, uploadedFiles]);
+  }, [logFiles, selectedLog, uploadedFiles, filePaths]);
 
-  const handleFileLoaded = useCallback(async (fileName: string, content: string) => {
+  const handleFileLoaded = useCallback(async (fileName: string, content: string, filePath?: string) => {
     // Store the raw content in state for immediate use
     setUploadedFiles(prev => ({ ...prev, [fileName]: content }));
     
-    // Also save to disk so it can be re-fetched later
-    try {
-      const formData = new FormData();
-      formData.append('file', new File([content], fileName, { type: 'application/json' }));
-      await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
-      });
-    } catch (e) {
-      console.error('Failed to save file to disk:', e);
+    // Store the file path if provided (for re-reading from original location)
+    if (filePath) {
+      setFilePaths(prev => ({ ...prev, [fileName]: filePath }));
+    } else {
+      // Save to disk so it can be re-fetched later
+      try {
+        const formData = new FormData();
+        formData.append('file', new File([content], fileName, { type: 'application/json' }));
+        await fetch('/api/upload', {
+          method: 'POST',
+          body: formData,
+        });
+      } catch (e) {
+        console.error('Failed to save file to disk:', e);
+      }
     }
     
     const parsed = parseLogFile(fileName, content);
