@@ -177,6 +177,9 @@ export function Dashboard() {
                   <span className="text-primary font-mono">02</span>
                   Recent Traces
                   <span className="text-[10px] text-muted-foreground/60 ml-1">(latest 10)</span>
+                  <Badge variant="secondary" className="text-[8px] px-1.5 py-0 h-4 animate-pulse">
+                    Auto-refresh
+                  </Badge>
                 </h2>
                 
                 {loadingDemos ? (
