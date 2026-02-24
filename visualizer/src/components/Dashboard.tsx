@@ -57,7 +57,13 @@ async function loadDemoLogs(
   }
 }
 
-async function reloadLogFile(fileName: string) {
+async function reloadLogFile(fileName: string, uploadedFiles: Record<string, string>) {
+  // If this is an uploaded file, use the stored content
+  if (uploadedFiles[fileName]) {
+    return parseLogFile(fileName, uploadedFiles[fileName]);
+  }
+  
+  // Otherwise try to fetch from logs directory
   try {
     const response = await fetch(`/logs/${fileName}`);
     if (!response.ok) throw new Error('Failed to reload log');
@@ -74,6 +80,7 @@ export function Dashboard() {
   const [selectedLog, setSelectedLog] = useState<RLMLogFile | null>(null);
   const [demoLogs, setDemoLogs] = useState<DemoLogInfo[]>([]);
   const [loadingDemos, setLoadingDemos] = useState(true);
+  const [uploadedFiles, setUploadedFiles] = useState<Record<string, string>>({});
 
   // Load demo log previews on mount - fetches latest 10 from API
   useEffect(() => {
@@ -86,7 +93,7 @@ export function Dashboard() {
       loadDemoLogs(setDemoLogs, setLoadingDemos);
       // Also reload any loaded log files to keep them up to date
       logFiles.forEach(log => {
-        reloadLogFile(log.fileName).then(updatedLog => {
+        reloadLogFile(log.fileName, uploadedFiles).then(updatedLog => {
           if (updatedLog) {
             setLogFiles(prev => prev.map(f => f.fileName === log.fileName ? updatedLog : f));
             if (selectedLog?.fileName === log.fileName) {
@@ -98,9 +105,12 @@ export function Dashboard() {
     }, 5000);
 
     return () => clearInterval(intervalId);
-  }, [logFiles, selectedLog]);
+  }, [logFiles, selectedLog, uploadedFiles]);
 
   const handleFileLoaded = useCallback((fileName: string, content: string) => {
+    // Store the raw content for future reloads
+    setUploadedFiles(prev => ({ ...prev, [fileName]: content }));
+    
     const parsed = parseLogFile(fileName, content);
     setLogFiles(prev => {
       if (prev.some(f => f.fileName === fileName)) {
