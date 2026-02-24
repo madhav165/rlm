@@ -88,6 +88,16 @@ export function Dashboard() {
     setSelectedLog(parsed);
   }, []);
 
+  // Auto-reload also refreshes the currently selected log if it's in the loaded files
+  useEffect(() => {
+    if (selectedLog) {
+      const currentLog = logFiles.find(f => f.fileName === selectedLog.fileName);
+      if (currentLog) {
+        setSelectedLog(currentLog);
+      }
+    }
+  }, [logFiles, selectedLog]);
+
   const loadDemoLog = useCallback(async (fileName: string) => {
     try {
       const response = await fetch(`/logs/${fileName}`);
