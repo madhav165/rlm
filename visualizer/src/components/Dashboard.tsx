@@ -19,6 +19,44 @@ interface DemoLogInfo {
   iterations: number;
 }
 
+async function loadDemoLogs(
+  setDemoLogs: React.Dispatch<React.SetStateAction<DemoLogInfo[]>>,
+  setLoadingDemos: React.Dispatch<React.SetStateAction<boolean>>
+) {
+  try {
+    const listResponse = await fetch('/api/logs');
+    if (!listResponse.ok) throw new Error('Failed to fetch log list');
+    const { files } = await listResponse.json();
+
+    const previews: DemoLogInfo[] = [];
+
+    for (const fileName of files) {
+      try {
+        const response = await fetch(`/logs/${fileName}`);
+        if (!response.ok) continue;
+        const content = await response.text();
+        const parsed = parseLogFile(fileName, content);
+        const contextVar = extractContextVariable(parsed.iterations);
+
+        previews.push({
+          fileName,
+          contextPreview: contextVar,
+          hasFinalAnswer: !!parsed.metadata.finalAnswer,
+          iterations: parsed.metadata.totalIterations,
+        });
+      } catch (e) {
+        console.error('Failed to load demo preview:', fileName, e);
+      }
+    }
+
+    setDemoLogs(previews);
+  } catch (e) {
+    console.error('Failed to load demo logs:', e);
+  } finally {
+    setLoadingDemos(false);
+  }
+}
+
 export function Dashboard() {
   const [logFiles, setLogFiles] = useState<RLMLogFile[]>([]);
   const [selectedLog, setSelectedLog] = useState<RLMLogFile | null>(null);
@@ -27,45 +65,7 @@ export function Dashboard() {
 
   // Load demo log previews on mount - fetches latest 10 from API
   useEffect(() => {
-    async function loadDemoPreviews() {
-      try {
-        // Fetch list of log files from API
-        const listResponse = await fetch('/api/logs');
-        if (!listResponse.ok) {
-          throw new Error('Failed to fetch log list');
-        }
-        const { files } = await listResponse.json();
-        
-        const previews: DemoLogInfo[] = [];
-        
-        for (const fileName of files) {
-          try {
-            const response = await fetch(`/logs/${fileName}`);
-            if (!response.ok) continue;
-            const content = await response.text();
-            const parsed = parseLogFile(fileName, content);
-            const contextVar = extractContextVariable(parsed.iterations);
-            
-            previews.push({
-              fileName,
-              contextPreview: contextVar,
-              hasFinalAnswer: !!parsed.metadata.finalAnswer,
-              iterations: parsed.metadata.totalIterations,
-            });
-          } catch (e) {
-            console.error('Failed to load demo preview:', fileName, e);
-          }
-        }
-        
-        setDemoLogs(previews);
-      } catch (e) {
-        console.error('Failed to load demo logs:', e);
-      } finally {
-        setLoadingDemos(false);
-      }
-    }
-    
-    loadDemoPreviews();
+    loadDemoLogs(setDemoLogs, setLoadingDemos);
   }, []);
 
   const handleFileLoaded = useCallback((fileName: string, content: string) => {
