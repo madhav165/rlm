@@ -123,6 +123,33 @@ The default `local` environment `LocalREPL` runs in the same process as the RLM 
 #### Docker <img src="https://github.com/docker.png" alt="Docker" height="20" style="vertical-align: middle;"/> (*requires [Docker installed](https://docs.docker.com/desktop/setup/install/)*)
 We also support a Docker-based environment called `DockerREPL` that launches the REPL environment as a Docker image. By default, we use the `python:3.11-slim` image, but the user can specify custom images as well.
 
+```python
+rlm = RLM(
+    environment="docker",
+    environment_kwargs={
+        "image": "python:3.11-slim",  # optional, this is the default
+    },
+)
+```
+
+**Mounting host directories (volumes)**
+
+Pass `volumes` as a `{host_path: container_path}` dict to make host directories readable and writable inside the container. This is useful for giving the model access to local files or for persisting output files back to the host.
+
+```python
+rlm = RLM(
+    environment="docker",
+    environment_kwargs={
+        "volumes": {
+            "/path/to/input":  "/data",    # model can read from /data
+            "/path/to/output": "/output",  # model writes here → files appear on host
+        },
+    },
+)
+```
+
+Files written to `/output` inside the container will appear at `/path/to/output` on the host after the completion finishes.
+
 ### Isolated Environments
 We support several different REPL environments that run on separate, cloud-based machines. Whenever a recursive sub-call is made in these instances, it is requested from the host process.
 
