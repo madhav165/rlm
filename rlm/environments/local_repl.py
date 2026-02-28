@@ -214,13 +214,13 @@ class LocalREPL(NonIsolatedEnv):
         self._mcp_tool_wrappers: dict[str, Callable[..., Any]] = {}
         if self.mcp_manager is not None:
             mcp_tools = self.mcp_manager.get_tools()
-            for tool_name in mcp_tools:
+            for tool_name, tool_info in mcp_tools.items():
                 if tool_name in RESERVED_TOOL_NAMES:
                     raise ValueError(
                         f"MCP tool '{tool_name}' conflicts with reserved name. "
                         f"Reserved names: {RESERVED_TOOL_NAMES}"
                     )
-                wrapper = self._create_mcp_tool_wrapper(tool_name)
+                wrapper = self._create_mcp_tool_wrapper(tool_name, tool_info.input_schema)
                 self.globals[tool_name] = wrapper
                 self._mcp_tool_wrappers[tool_name] = wrapper
 
@@ -361,25 +361,28 @@ class LocalREPL(NonIsolatedEnv):
         # Fall back to plain batched LM call if no recursive capability
         return self._llm_query_batched(prompts, model)
 
-    def _create_mcp_tool_wrapper(self, tool_name: str) -> Callable[..., Any]:
+    def _create_mcp_tool_wrapper(
+        self, tool_name: str, input_schema: dict[str, Any]
+    ) -> Callable[..., Any]:
         """Create a wrapper function for an MCP tool that calls it via the MCP manager."""
 
         def mcp_tool_wrapper(*args: Any, **kwargs: Any) -> Any:
             if self.mcp_manager is None:
                 return "Error: MCP manager not available"
 
-            # Build arguments dict from args and kwargs
-            # This is a simplification - in reality, we need to inspect the function signature
-            # For now, we'll pass whatever we get
             arguments = kwargs.copy()
-            # If there are positional args, try to map them (naive approach)
-            # A more sophisticated approach would inspect the tool's inputSchema
+
             if args:
-                arguments["_args"] = list(args)
+                properties = input_schema.get("properties", {})
+                prop_names = list(properties.keys())
+
+                for i, arg in enumerate(args):
+                    if i < len(prop_names):
+                        prop_name = prop_names[i]
+                        arguments[prop_name] = arg
 
             try:
                 result = self.mcp_manager.call_tool(tool_name, arguments)
-                # Extract text content from result
                 if hasattr(result, "content") and result.content:
                     texts = []
                     for item in result.content:

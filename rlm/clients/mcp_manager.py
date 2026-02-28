@@ -8,7 +8,7 @@ from typing import Any
 
 from mcp import ClientSession, types
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import StreamableHTTPTransport
+from mcp.client.streamable_http import streamable_http_client
 
 
 @dataclass
@@ -58,7 +58,9 @@ class MCPClientManager:
     def get_tools(self) -> dict[str, MCPToolInfo]:
         return self._tools.copy()
 
-    def call_tool(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
+    def call_tool(
+        self, name: str, arguments: dict[str, Any], timeout: float = 30.0
+    ) -> types.CallToolResult:
         if name not in self._tools:
             raise MCPError(f"Unknown tool: {name}")
 
@@ -66,7 +68,7 @@ class MCPClientManager:
         session = self._sessions[tool_info.server_name]
 
         async def _call_tool() -> types.CallToolResult:
-            return await session.call_tool(name, arguments)
+            return await asyncio.wait_for(session.call_tool(name, arguments), timeout=timeout)
 
         result = self._loop.run_until_complete(_call_tool())
         return result
@@ -111,15 +113,13 @@ class MCPClientManager:
         if not url:
             raise ValueError(f"MCP server {name} requires 'url' for HTTP transport")
 
-        transport = StreamableHTTPTransport(url=url)
-        read, write = await transport.connect()
-        session = ClientSession(read, write)
-        await self._exit_stack.enter_async_context(session)
-        await session.initialize()
-        self._sessions[name] = session
+        async with streamable_http_client(url) as (read, write, _):
+            session = await self._exit_stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+            self._sessions[name] = session
 
-        tools_result = await session.list_tools()
-        self._register_tools(name, tools_result)
+            tools_result = await session.list_tools()
+            self._register_tools(name, tools_result)
 
     def _register_tools(self, server_name: str, tools_result: types.ListToolsResult) -> None:
         for tool in tools_result.tools:
