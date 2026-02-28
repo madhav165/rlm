@@ -2,7 +2,106 @@
 
 **Feature**: Connect RLM as an MCP client to external MCP servers
 **Date**: 2026-02-28
-**Status**: Planned
+**Status**: In Progress (LocalREPL done, DockerREPL planned)
+
+---
+
+## Completed: LocalREPL Integration
+
+See above for completed implementation. LocalREPL can now use MCP tools.
+
+---
+
+## Planned: MCP Tools in Isolated Environments (Docker, Modal, etc.)
+
+### Problem
+
+When using isolated environments (Docker, Modal, Prime, etc.), code runs inside a sandbox. MCP servers started on the host are not accessible from inside the sandbox.
+
+### Solution
+
+Start MCP servers **inside** the isolated environment (container/sandbox), not on the host.
+
+### Architecture
+
+```
+Host                          Container (persistent)
+┌─────────────┐             ┌─────────────────────────────┐
+│  RLM        │ exec        │  ┌─────────────────────┐    │
+│  (Python)   │ ──────────▶ │  │ MCP Server 1 (bg)   │    │
+│             │             │  │ MCP Server 2 (bg)   │    │
+│             │             │  └──────────┬──────────┘    │
+│             │             │             │               │
+│             │             │  ┌──────────▼──────────┐    │
+│             │             │  │ Python exec script  │    │
+│             │             │  │ (connects to MCP)  │    │
+└─────────────┘             └─────────────────────────────┘
+```
+
+### Configuration
+
+Same format as LocalREPL:
+
+```python
+rlm = RLM(
+    environment="docker",
+    environment_kwargs={"image": "rlm-sandbox"},
+    mcp_servers={
+        "filesystem": {
+            "type": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"],
+        },
+    },
+)
+```
+
+### Implementation for DockerREPL
+
+**Changes:**
+
+1. **Accept `mcp_servers` param** in `DockerREPL.__init__()`
+
+2. **Start MCP servers on container init:**
+   - For `stdio` type: exec into container and start process in background
+   - For HTTP types: no action needed, just store URL
+
+3. **Keep container persistent:**
+   - Currently DockerREPL runs one-off commands
+   - Need to keep container running between executions
+   - Use `docker exec` instead of `docker run` for subsequent calls
+
+4. **Execution script changes:**
+   - Embed MCP client that connects to in-container servers
+   - For stdio: use asyncio subprocess to communicate
+   - For HTTP: make requests to stored URLs
+
+5. **Cleanup:**
+   - Kill MCP server processes
+   - Stop container
+
+### Handling by Transport Type
+
+| Transport | Host Side | Container Side |
+|-----------|-----------|----------------|
+| `stdio` | Start process in container | Connect via subprocess |
+| `streamable-http` | No setup | Connect via HTTP URL |
+| `sse` | No setup | Connect via HTTP URL |
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `rlm/environments/docker_repl.py` | Add mcp_servers support, persistent container |
+| `rlm/environments/modal_repl.py` | Same pattern |
+| `rlm/environments/prime_repl.py` | Same pattern |
+
+### Testing
+
+```bash
+# Test filesystem MCP in Docker
+uv run pytest tests/repl/test_mcp_tools.py::TestMCPInDocker -v
+```
 
 ## Overview
 
