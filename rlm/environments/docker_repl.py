@@ -416,6 +416,26 @@ class DockerREPL(NonIsolatedEnv):
                             capture_output=True,
                         )
 
+        # Install Node.js and pre-install npx-based MCP packages globally
+        if self.mcp_servers and any(
+            c.get("type", "stdio") == "stdio" and c.get("command") == "npx"
+            for c in self.mcp_servers.values()
+        ):
+            subprocess.run(
+                ["docker", "exec", self.container_id, "sh", "-c",
+                 "apt-get update -qq && apt-get install -y -q nodejs npm"],
+                capture_output=True,
+            )
+            for _config in self.mcp_servers.values():
+                if _config.get("type", "stdio") == "stdio" and _config.get("command") == "npx":
+                    _args = _config.get("args", [])
+                    _pkg = next((a for a in _args if not a.startswith("-")), None)
+                    if _pkg:
+                        subprocess.run(
+                            ["docker", "exec", self.container_id, "npm", "install", "-g", _pkg],
+                            capture_output=True,
+                        )
+
         # Start MCP servers in container if provided
         if self.mcp_servers:
             self._start_mcp_servers_in_container()
