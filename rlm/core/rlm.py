@@ -270,10 +270,21 @@ class RLM:
         up the initial message history.
         """
         metadata = QueryMetadata(prompt)
+
+        tools_for_prompt = self.custom_tools.copy() if self.custom_tools else {}
+
+        if self._mcp_manager is not None:
+            for tool_name, tool_info in self._mcp_manager.get_tools().items():
+                if tool_name not in tools_for_prompt:
+                    tools_for_prompt[tool_name] = {
+                        "tool": f"MCP tool from {tool_info.server_name}",
+                        "description": tool_info.description or f"MCP tool: {tool_name}",
+                    }
+
         message_history = build_rlm_system_prompt(
             system_prompt=self.system_prompt,
             query_metadata=metadata,
-            custom_tools=self.custom_tools,
+            custom_tools=tools_for_prompt,
         )
         if self.compaction:
             message_history[0]["content"] += (
