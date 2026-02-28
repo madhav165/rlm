@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from rlm.core.types import REPLResult
@@ -31,6 +31,7 @@ class ToolInfo:
     name: str
     value: Any
     description: str | None = None
+    input_schema: dict[str, Any] | None = field(default=None, compare=False)
 
     @property
     def is_callable(self) -> bool:
@@ -56,9 +57,13 @@ def parse_tool_entry(name: str, entry: Any) -> ToolInfo:
     if isinstance(entry, dict) and "tool" in entry:
         value = entry["tool"]
         description = entry.get("description")
-        if description is not None and isinstance(description, str):
-            return ToolInfo(name=name, value=value, description=description)
-        return ToolInfo(name=name, value=value, description=None)
+        input_schema = entry.get("input_schema")
+        return ToolInfo(
+            name=name,
+            value=value,
+            description=description if isinstance(description, str) else None,
+            input_schema=input_schema if isinstance(input_schema, dict) else None,
+        )
     # No description - treat as plain value
     return ToolInfo(name=name, value=entry, description=None)
 
@@ -93,6 +98,22 @@ def extract_tool_value(entry: Any) -> Any:
     return entry
 
 
+def _format_input_schema(schema: dict[str, Any]) -> str:
+    """Render an MCP input schema as a Python-style parameter signature."""
+    props = schema.get("properties", {})
+    required = set(schema.get("required", []))
+    if not props:
+        return "()"
+    params = []
+    for param_name, param_info in props.items():
+        type_str = param_info.get("type", "any")
+        if param_name in required:
+            params.append(f"{param_name}: {type_str}")
+        else:
+            params.append(f"{param_name}: {type_str} = None")
+    return "(" + ", ".join(params) + ")"
+
+
 def format_tools_for_prompt(custom_tools: dict[str, Any] | None) -> str | None:
     """
     Format custom tools for inclusion in the system prompt.
@@ -112,17 +133,24 @@ def format_tools_for_prompt(custom_tools: dict[str, Any] | None) -> str | None:
 
     lines = []
     for tool in tool_infos:
-        if tool.is_callable:
+        if tool.input_schema is not None:
+            sig = _format_input_schema(tool.input_schema)
+            line = f"- `{tool.name}{sig}`"
             if tool.description:
-                lines.append(f"- `{tool.name}`: {tool.description}")
+                line += f": {tool.description}"
+        elif tool.is_callable:
+            line = f"- `{tool.name}`"
+            if tool.description:
+                line += f": {tool.description}"
             else:
-                lines.append(f"- `{tool.name}`: A custom function")
+                line += ": A custom function"
         else:
+            line = f"- `{tool.name}`"
             if tool.description:
-                lines.append(f"- `{tool.name}`: {tool.description}")
+                line += f": {tool.description}"
             else:
-                type_name = type(tool.value).__name__
-                lines.append(f"- `{tool.name}`: A custom {type_name} value")
+                line += f": A custom {type(tool.value).__name__} value"
+        lines.append(line)
 
     return "\n".join(lines)
 

@@ -284,6 +284,7 @@ class RLM:
                     tools_for_prompt[tool_name] = {
                         "tool": f"MCP tool from {tool_info.server_name}",
                         "description": tool_info.description or f"MCP tool: {tool_name}",
+                        "input_schema": tool_info.input_schema,
                     }
 
         message_history = build_rlm_system_prompt(
