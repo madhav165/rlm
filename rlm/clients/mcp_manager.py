@@ -72,6 +72,10 @@ class MCPClientManager:
                 return await asyncio.wait_for(session.call_tool(name, arguments), timeout=timeout)
             except TimeoutError as err:
                 raise MCPError(f"Tool '{name}' timed out after {timeout}s") from err
+            except asyncio.CancelledError as err:
+                raise MCPError(f"Tool '{name}' was cancelled") from err
+            except Exception as err:
+                raise MCPError(f"Tool '{name}' failed: {err}") from err
 
         result = self._loop.run_until_complete(_call_tool())
         return result
