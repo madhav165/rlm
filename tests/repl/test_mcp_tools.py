@@ -4,6 +4,8 @@ Integration tests for MCP tools in REPL.
 Run with: uv run pytest tests/repl/test_mcp_tools.py -v
 """
 
+import importlib.util
+
 import pytest
 
 from rlm.clients.mcp_manager import MCPClientManager, MCPError
@@ -186,6 +188,217 @@ class TestMCPToolsInREPL:
         # Result should be in locals
         assert "result" in repl.locals
         print(f"Result value: {repl.locals['result']}")
+
+        repl.cleanup()
+        manager.disconnect_all()
+
+
+# =============================================================================
+# Tests for Isolated Environments (Docker, Modal, Prime)
+# =============================================================================
+
+
+class TestMCPInDocker:
+    """Tests for MCP tools in DockerREPL."""
+
+    def test_mcp_tool_execution_in_docker_repl(self):
+        """Test executing an MCP tool through DockerREPL."""
+        pytest.importorskip("docker")
+        from rlm.environments.docker_repl import DockerREPL
+
+        config = {
+            "time": {
+                "type": "stdio",
+                "command": "uvx",
+                "args": ["mcp-server-time"],
+            }
+        }
+
+        manager = MCPClientManager(config)
+        manager.connect_all()
+
+        repl = DockerREPL(mcp_servers=config)
+
+        # Call the tool through REPL
+        result = repl.execute_code("result = get_current_time()")
+
+        # Should have executed without error
+        assert result.stderr == "", f"Unexpected error: {result.stderr}"
+
+        # Result should be in locals
+        assert "result" in result.locals, f"result not in locals: {list(result.locals.keys())}"
+
+        repl.cleanup()
+        manager.disconnect_all()
+
+    def test_mcp_tool_with_timezone_in_docker_repl(self):
+        """Test executing an MCP tool with arguments through DockerREPL."""
+        pytest.importorskip("docker")
+        from rlm.environments.docker_repl import DockerREPL
+
+        config = {
+            "time": {
+                "type": "stdio",
+                "command": "uvx",
+                "args": ["mcp-server-time"],
+            }
+        }
+
+        manager = MCPClientManager(config)
+        manager.connect_all()
+
+        repl = DockerREPL(mcp_servers=config)
+
+        # Call the tool with arguments through REPL
+        result = repl.execute_code(
+            "result = convert_time(source_timezone='UTC', target_timezone='America/Los_Angeles', time='2024-06-15T15:00:00Z')"
+        )
+
+        # Should have executed without error
+        assert result.stderr == "", f"Unexpected error: {result.stderr}"
+
+        # Result should be in locals
+        assert "result" in result.locals, f"result not in locals: {list(result.locals.keys())}"
+
+        repl.cleanup()
+        manager.disconnect_all()
+
+
+class TestMCPInModal:
+    """Tests for MCP tools in ModalREPL."""
+
+    def test_mcp_tool_execution_in_modal_repl(self):
+        """Test executing an MCP tool through ModalREPL."""
+        if importlib.util.find_spec("modal") is None:
+            pytest.skip("modal not installed")
+
+        from rlm.environments.modal_repl import ModalREPL
+
+        config = {
+            "time": {
+                "type": "stdio",
+                "command": "uvx",
+                "args": ["mcp-server-time"],
+            }
+        }
+
+        manager = MCPClientManager(config)
+        manager.connect_all()
+
+        repl = ModalREPL(mcp_servers=config)
+
+        # Call the tool through REPL
+        result = repl.execute_code("result = get_current_time()")
+
+        # Should have executed without error
+        assert result.stderr == "", f"Unexpected error: {result.stderr}"
+
+        # Result should be in locals
+        assert "result" in result.locals, f"result not in locals: {list(result.locals.keys())}"
+
+        repl.cleanup()
+        manager.disconnect_all()
+
+    def test_mcp_tool_with_timezone_in_modal_repl(self):
+        """Test executing an MCP tool with arguments through ModalREPL."""
+        if importlib.util.find_spec("modal") is None:
+            pytest.skip("modal not installed")
+
+        from rlm.environments.modal_repl import ModalREPL
+
+        config = {
+            "time": {
+                "type": "stdio",
+                "command": "uvx",
+                "args": ["mcp-server-time"],
+            }
+        }
+
+        manager = MCPClientManager(config)
+        manager.connect_all()
+
+        repl = ModalREPL(mcp_servers=config)
+
+        # Call the tool with arguments through REPL
+        result = repl.execute_code(
+            "result = convert_time(source_timezone='UTC', target_timezone='America/Los_Angeles', time='2024-06-15T15:00:00Z')"
+        )
+
+        # Should have executed without error
+        assert result.stderr == "", f"Unexpected error: {result.stderr}"
+
+        # Result should be in locals
+        assert "result" in result.locals, f"result not in locals: {list(result.locals.keys())}"
+
+        repl.cleanup()
+        manager.disconnect_all()
+
+
+class TestMCPInPrime:
+    """Tests for MCP tools in PrimeREPL."""
+
+    def test_mcp_tool_execution_in_prime_repl(self):
+        """Test executing an MCP tool through PrimeREPL."""
+        if importlib.util.find_spec("prime_sandboxes") is None:
+            pytest.skip("prime_sandboxes not installed")
+
+        from rlm.environments.prime_repl import PrimeREPL
+
+        config = {
+            "time": {
+                "type": "stdio",
+                "command": "uvx",
+                "args": ["mcp-server-time"],
+            }
+        }
+
+        manager = MCPClientManager(config)
+        manager.connect_all()
+
+        repl = PrimeREPL(mcp_servers=config)
+
+        # Call the tool through REPL
+        result = repl.execute_code("result = get_current_time()")
+
+        # Should have executed without error
+        assert result.stderr == "", f"Unexpected error: {result.stderr}"
+
+        # Result should be in locals
+        assert "result" in result.locals, f"result not in locals: {list(result.locals.keys())}"
+
+        repl.cleanup()
+        manager.disconnect_all()
+
+    def test_mcp_tool_with_timezone_in_prime_repl(self):
+        """Test executing an MCP tool with arguments through PrimeREPL."""
+        if importlib.util.find_spec("prime_sandboxes") is None:
+            pytest.skip("prime_sandboxes not installed")
+
+        from rlm.environments.prime_repl import PrimeREPL
+
+        config = {
+            "time": {
+                "type": "stdio",
+                "command": "uvx",
+                "args": ["mcp-server-time"],
+            }
+        }
+
+        manager = MCPClientManager(config)
+        manager.connect_all()
+
+        repl = PrimeREPL(mcp_servers=config)
+
+        # Call the tool with arguments through REPL
+        result = repl.execute_code(
+            "result = convert_time(source_timezone='UTC', target_timezone='America/Los_Angeles', time='2024-06-15T15:00:00Z')"
+        )
+
+        # Should have executed without error
+        assert result.stderr == "", f"Unexpected error: {result.stderr}"
+
+        # Result should be in locals
+        assert "result" in result.locals, f"result not in locals: {list(result.locals.keys())}"
 
         repl.cleanup()
         manager.disconnect_all()
