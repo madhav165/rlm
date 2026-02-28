@@ -98,20 +98,24 @@ def extract_tool_value(entry: Any) -> Any:
     return entry
 
 
-def _format_input_schema(schema: dict[str, Any]) -> str:
-    """Render an MCP input schema as a Python-style parameter signature."""
+def _format_input_schema(schema: dict[str, Any]) -> tuple[str, list[str]]:
+    """Render an MCP input schema as a (signature, param_descriptions) tuple."""
     props = schema.get("properties", {})
     required = set(schema.get("required", []))
     if not props:
-        return "()"
+        return "()", []
     params = []
+    descriptions = []
     for param_name, param_info in props.items():
         type_str = param_info.get("type", "any")
         if param_name in required:
             params.append(f"{param_name}: {type_str}")
         else:
             params.append(f"{param_name}: {type_str} = None")
-    return "(" + ", ".join(params) + ")"
+        desc = param_info.get("description")
+        if desc:
+            descriptions.append(f"    {param_name}: {desc}")
+    return "(" + ", ".join(params) + ")", descriptions
 
 
 def format_tools_for_prompt(custom_tools: dict[str, Any] | None) -> str | None:
@@ -134,10 +138,12 @@ def format_tools_for_prompt(custom_tools: dict[str, Any] | None) -> str | None:
     lines = []
     for tool in tool_infos:
         if tool.input_schema is not None:
-            sig = _format_input_schema(tool.input_schema)
+            sig, param_descs = _format_input_schema(tool.input_schema)
             line = f"- `{tool.name}{sig}`"
             if tool.description:
                 line += f": {tool.description}"
+            if param_descs:
+                line += "\n" + "\n".join(param_descs)
         elif tool.is_callable:
             line = f"- `{tool.name}`"
             if tool.description:
