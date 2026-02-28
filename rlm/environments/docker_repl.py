@@ -165,15 +165,15 @@ def _call_mcp_tool(name, arguments):
     except Exception as e:
         return f"Error: MCP tool '{{name}}' failed: {{e}}"
 
-def _create_mcp_tool_wrappers():
-    for tool_name in list(_mcp_tools.keys()):
-        def make_wrapper(name):
-            def wrapper(**kwargs):
-                return _call_mcp_tool(name, kwargs)
-            wrapper.__name__ = name
-            wrapper.__doc__ = _mcp_tools[name]["tool"].description
-            return wrapper
-        globals()[tool_name] = make_wrapper(tool_name)
+# Add MCP tools to globals
+for tool_name in list(_mcp_tools.keys()):
+    def make_wrapper(name):
+        def wrapper(**kwargs):
+            return _call_mcp_tool(name, kwargs)
+        wrapper.__name__ = name
+        wrapper.__doc__ = _mcp_tools[name]["tool"].description
+        return wrapper
+    globals()[tool_name] = make_wrapper(tool_name)
 """
         )
 
