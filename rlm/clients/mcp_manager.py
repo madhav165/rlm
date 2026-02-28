@@ -68,7 +68,10 @@ class MCPClientManager:
         session = self._sessions[tool_info.server_name]
 
         async def _call_tool() -> types.CallToolResult:
-            return await asyncio.wait_for(session.call_tool(name, arguments), timeout=timeout)
+            try:
+                return await asyncio.wait_for(session.call_tool(name, arguments), timeout=timeout)
+            except TimeoutError as err:
+                raise MCPError(f"Tool '{name}' timed out after {timeout}s") from err
 
         result = self._loop.run_until_complete(_call_tool())
         return result
