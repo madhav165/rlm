@@ -219,8 +219,8 @@ class TestMCPInDocker:
 
         repl = DockerREPL(mcp_servers=config)
 
-        # Call the tool through REPL
-        result = repl.execute_code("result = get_current_time()")
+        # Call the tool through REPL - get_current_time requires timezone argument
+        result = repl.execute_code("result = get_current_time(timezone='UTC')")
 
         # Should have executed without error
         assert result.stderr == "", f"Unexpected error: {result.stderr}"
@@ -287,8 +287,8 @@ class TestMCPInModal:
 
         repl = ModalREPL(mcp_servers=config)
 
-        # Call the tool through REPL
-        result = repl.execute_code("result = get_current_time()")
+        # Call the tool through REPL - get_current_time requires timezone argument
+        result = repl.execute_code("result = get_current_time(timezone='UTC')")
 
         # Should have executed without error
         assert result.stderr == "", f"Unexpected error: {result.stderr}"
@@ -357,8 +357,8 @@ class TestMCPInPrime:
 
         repl = PrimeREPL(mcp_servers=config)
 
-        # Call the tool through REPL
-        result = repl.execute_code("result = get_current_time()")
+        # Call the tool through REPL - get_current_time requires timezone argument
+        result = repl.execute_code("result = get_current_time(timezone='UTC')")
 
         # Should have executed without error
         assert result.stderr == "", f"Unexpected error: {result.stderr}"
