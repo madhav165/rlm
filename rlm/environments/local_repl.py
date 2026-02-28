@@ -210,10 +210,19 @@ class LocalREPL(NonIsolatedEnv):
 
         # Add MCP tools to globals
         # Each MCP tool is wrapped as a callable that invokes the MCP tool
+        # Track them separately so we can restore after code execution
+        self._mcp_tool_wrappers: dict[str, Callable[..., Any]] = {}
         if self.mcp_manager is not None:
             mcp_tools = self.mcp_manager.get_tools()
             for tool_name in mcp_tools:
-                self.globals[tool_name] = self._create_mcp_tool_wrapper(tool_name)
+                if tool_name in RESERVED_TOOL_NAMES:
+                    raise ValueError(
+                        f"MCP tool '{tool_name}' conflicts with reserved name. "
+                        f"Reserved names: {RESERVED_TOOL_NAMES}"
+                    )
+                wrapper = self._create_mcp_tool_wrapper(tool_name)
+                self.globals[tool_name] = wrapper
+                self._mcp_tool_wrappers[tool_name] = wrapper
 
     def _final_var(self, variable_name: str | Any) -> str:
         """Return the value of a variable as a final answer for the main model, or stringify a direct value."""
@@ -521,6 +530,10 @@ class LocalREPL(NonIsolatedEnv):
                 self.locals["history"] = self.locals["history_0"]
             elif name == "history" and self.compaction:
                 self.locals["history"] = self._compaction_history
+
+        # Restore MCP tool wrappers in case user code overwrote them
+        for tool_name, wrapper in self._mcp_tool_wrappers.items():
+            self.globals[tool_name] = wrapper
 
     def execute_code(self, code: str) -> REPLResult:
         """Execute code in the persistent namespace and return result."""

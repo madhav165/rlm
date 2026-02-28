@@ -83,6 +83,8 @@ class MCPClientManager:
 
     async def _connect_stdio_server_async(self, name: str, config: dict[str, Any]) -> None:
         command = config.get("command")
+        if not command:
+            raise ValueError(f"MCP stdio server '{name}' requires 'command' in config")
         args = config.get("args", [])
         env = config.get("env", {})
 

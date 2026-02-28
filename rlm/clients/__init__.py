@@ -3,9 +3,13 @@ from typing import Any
 from dotenv import load_dotenv
 
 from rlm.clients.base_lm import BaseLM
+from rlm.clients.mcp_manager import MCPClientManager as MCPClientManager
+from rlm.clients.mcp_manager import MCPError as MCPError
 from rlm.core.types import ClientBackend
 
 load_dotenv()
+
+__all__ = ["BaseLM", "MCPClientManager", "MCPError", "get_client"]
 
 
 def get_client(
