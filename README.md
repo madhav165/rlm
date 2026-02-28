@@ -117,6 +117,70 @@ export PRIME_API_KEY=...
 ### Model Providers
 We currently support most major clients (OpenAI, Anthropic), as well as the router platforms (OpenRouter, Portkey, LiteLLM). For local models, we recommend using vLLM (which interfaces with the [OpenAI client](https://github.com/alexzhang13/rlm/blob/main/rlm/clients/openai.py)). To view or add support for more clients, start by looking at [`rlm/clients/`](https://github.com/alexzhang13/rlm/tree/main/rlm/clients).
 
+## Using MCP Tools
+
+RLM can connect to external MCP (Model Context Protocol) servers to expose their tools to the model. This allows the RLM to call tools from any MCP-compatible server.
+
+### Configuration
+
+Pass `mcp_servers` to the RLM constructor:
+
+```python
+from rlm import RLM
+
+rlm = RLM(
+    backend="openai",
+    backend_kwargs={"model_name": "gpt-5-nano"},
+    mcp_servers={
+        "time": {
+            "type": "stdio",
+            "command": "uvx",
+            "args": ["mcp-server-time"],
+        },
+    },
+)
+```
+
+### Supported Transport Types
+
+- **stdio**: Local process (command + args)
+- **streamable-http**: HTTP endpoint
+- **sse**: Legacy HTTP SSE
+
+```python
+# Stdio (local server)
+mcp_servers={
+    "my_server": {
+        "type": "stdio",
+        "command": "python",
+        "args": ["server.py"],
+        "env": {"API_KEY": "..."},  # optional env vars
+    }
+}
+
+# HTTP
+mcp_servers={
+    "remote": {
+        "type": "streamable-http",
+        "url": "http://localhost:8080/mcp",
+    }
+}
+```
+
+### Usage in REPL
+
+Once configured, MCP tools are available as Python functions in the REPL:
+
+```python
+# The model can call MCP tools directly in code
+current_time = get_current_time(timezone="Asia/Kolkata")
+converted = convert_time(
+    source_timezone="UTC",
+    target_timezone="America/New_York", 
+    time="2024-01-01T12:00:00Z"
+)
+```
+
 ## Relevant Reading
 * **[Dec '25]** [Recursive Language Models arXiv](https://arxiv.org/abs/2512.24601)
 * **[Oct '25]** [Recursive Language Models Blogpost](https://alexzhang13.github.io/blog/2025/rlm/)
