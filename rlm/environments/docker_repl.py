@@ -154,10 +154,15 @@ def _init_mcp():
     _mcp_loop.run_until_complete(_connect_all_mcp())
     for tool_name in list(_mcp_tools.keys()):
         def make_wrapper(name):
-            def wrapper(**kwargs):
+            tool = _mcp_tools[name]["tool"]
+            props = list((tool.inputSchema.get("properties") or {}).keys())
+            def wrapper(*args, **kwargs):
+                for i, arg in enumerate(args):
+                    if i < len(props):
+                        kwargs[props[i]] = arg
                 return _call_mcp_tool(name, kwargs)
             wrapper.__name__ = name
-            wrapper.__doc__ = _mcp_tools[name]["tool"].description
+            wrapper.__doc__ = tool.description
             return wrapper
         globals()[tool_name] = make_wrapper(tool_name)
 
