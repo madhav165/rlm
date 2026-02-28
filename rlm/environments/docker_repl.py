@@ -164,6 +164,16 @@ def _call_mcp_tool(name, arguments):
         return str(result)
     except Exception as e:
         return f"Error: MCP tool '{{name}}' failed: {{e}}"
+
+def _create_mcp_tool_wrappers():
+    for tool_name in list(_mcp_tools.keys()):
+        def make_wrapper(name):
+            def wrapper(**kwargs):
+                return _call_mcp_tool(name, kwargs)
+            wrapper.__name__ = name
+            wrapper.__doc__ = _mcp_tools[name]["tool"].description
+            return wrapper
+        globals()[tool_name] = make_wrapper(tool_name)
 """
         )
 
@@ -234,7 +244,8 @@ def SHOW_VARS():
 
 _globals = {{"__builtins__": __builtins__, "__name__": "__main__", "llm_query": llm_query, "llm_query_batched": llm_query_batched, "FINAL_VAR": FINAL_VAR, "SHOW_VARS": SHOW_VARS}}
 
-{"_init_mcp()" if mcp_config else ""}
+# Initialize MCP servers and add tools to globals
+{"_init_mcp(); _create_mcp_tool_wrappers()" if mcp_config else ""}
 
 code = base64.b64decode("{code_b64}").decode()
 stdout_buf, stderr_buf = io.StringIO(), io.StringIO()
