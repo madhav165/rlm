@@ -86,10 +86,13 @@ For local development where you want to use the latest code:
 pip install -e .
 ```
 
-Or install from a specific branch:
+Or with uv from a specific branch:
+
 ```bash
-pip install -e git+https://github.com/madhav165/rlm.git@feat/add-mcp-support#egg=rlm
+uv pip install git+https://github.com/madhav165/rlm.git@feat/add-mcp-support
 ```
+
+Note: `-e` (editable) only works with local directories. For remote branches, install normally and reinstall after updates.
 
 ### Production
 
