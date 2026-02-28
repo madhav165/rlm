@@ -247,9 +247,14 @@ class RLM:
                 env_kwargs["custom_tools"] = self.custom_tools
             if self.custom_sub_tools is not None:
                 env_kwargs["custom_sub_tools"] = self.custom_sub_tools
-            # Pass MCP client manager to the environment
-            if self._mcp_manager is not None:
-                env_kwargs["mcp_manager"] = self._mcp_manager
+            # Pass MCP config to the environment
+            # LocalREPL uses a shared MCPClientManager; isolated envs (Docker, Modal, Prime)
+            # connect their own MCP clients inside the sandbox using the raw config dict.
+            if self.mcp_servers is not None:
+                if self.environment_type == "local":
+                    env_kwargs["mcp_manager"] = self._mcp_manager
+                else:
+                    env_kwargs["mcp_servers"] = self.mcp_servers
             if self.compaction and self.environment_type == "local":
                 env_kwargs["compaction"] = True
             environment: BaseEnv = get_environment(self.environment_type, env_kwargs)
