@@ -88,9 +88,84 @@ class LLMProxyHandler(BaseHTTPRequestHandler):
         return {"responses": results}
 
 
-def _build_exec_script(code: str, proxy_port: int, depth: int = 1) -> str:
+def _build_exec_script(
+    code: str, proxy_port: int, depth: int = 1, mcp_config: dict | None = None
+) -> str:
     """Build execution script for the container."""
     code_b64 = base64.b64encode(code.encode()).decode()
+    mcp_config_b64 = base64.b64encode(json.dumps(mcp_config or {}).encode()).decode()
+
+    mcp_setup = ""
+    if mcp_config:
+        mcp_setup = textwrap.dedent(
+            '''
+import asyncio
+import json
+import base64
+from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.streamable_http import streamable_http_client
+
+_mcp_configs = json.loads(base64.b64decode("'''
+            + mcp_config_b64
+            + """").decode())
+_mcp_sessions = {}
+_mcp_tools = {}
+
+async def _connect_mcp_server(name, config):
+    server_type = config.get("type", "stdio")
+    if server_type == "stdio":
+        command = config.get("command")
+        args = config.get("args", [])
+        env = config.get("env", {})
+        import os
+        merged_env = os.environ.copy()
+        merged_env.update(env)
+        server_params = StdioServerParameters(command=command, args=args, env=merged_env)
+        read, write = await stdio_client(server_params).__aenter__()
+        session = await ClientSession(read, write).__aenter__()
+        await session.initialize()
+        tools_result = await session.list_tools()
+        for tool in tools_result.tools:
+            _mcp_tools[tool.name] = {"session": session, "tool": tool}
+        _mcp_sessions[name] = session
+    elif server_type in ("streamable-http", "sse"):
+        url = config.get("url")
+        read, write, _ = await streamable_http_client(url).__aenter__()
+        session = await ClientSession(read, write).__aenter__()
+        await session.initialize()
+        tools_result = await session.list_tools()
+        for tool in tools_result.tools:
+            _mcp_tools[tool.name] = {"session": session, "tool": tool}
+        _mcp_sessions[name] = session
+
+async def _connect_all_mcp():
+    for name, config in _mcp_configs.items():
+        await _connect_mcp_server(name, config)
+
+def _init_mcp():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(_connect_all_mcp())
+
+def _call_mcp_tool(name, arguments):
+    if name not in _mcp_tools:
+        return f"Error: Unknown tool: {{name}}"
+    try:
+        result = _mcp_tools[name]["session"].call_tool(name, arguments)
+        if hasattr(result, "content") and result.content:
+            texts = []
+            for item in result.content:
+                if hasattr(item, "text"):
+                    texts.append(item.text)
+                else:
+                    texts.append(str(item))
+            return "\\n".join(texts) if texts else str(result)
+        return str(result)
+    except Exception as e:
+        return f"Error: MCP tool '{{name}}' failed: {{e}}"
+"""
+        )
 
     return textwrap.dedent(
         f'''
@@ -102,6 +177,8 @@ except ImportError:
 
 PROXY = "http://host.docker.internal:{proxy_port}"
 STATE = "/workspace/state.dill"
+
+{mcp_setup}
 
 def llm_query(prompt, model=None):
     try:
@@ -157,6 +234,8 @@ def SHOW_VARS():
 
 _globals = {{"__builtins__": __builtins__, "__name__": "__main__", "llm_query": llm_query, "llm_query_batched": llm_query_batched, "FINAL_VAR": FINAL_VAR, "SHOW_VARS": SHOW_VARS}}
 
+{"_init_mcp()" if mcp_config else ""}
+
 code = base64.b64decode("{code_b64}").decode()
 stdout_buf, stderr_buf = io.StringIO(), io.StringIO()
 old_stdout, old_stderr = sys.stdout, sys.stderr
@@ -200,6 +279,7 @@ class DockerREPL(NonIsolatedEnv):
         setup_code: str | None = None,
         persistent: bool = False,
         depth: int = 1,
+        mcp_servers: dict[str, dict] | None = None,
         **kwargs,
     ):
         if persistent:
@@ -214,6 +294,8 @@ class DockerREPL(NonIsolatedEnv):
         self.proxy_server: HTTPServer | None = None
         self.proxy_thread: threading.Thread | None = None
         self.proxy_port: int = 0
+        self.mcp_servers = mcp_servers
+        self.mcp_config_path: str | None = None
         base_dir = os.environ.get(
             "RLM_DOCKER_WORKSPACE_DIR", os.path.join(os.getcwd(), ".rlm_workspace")
         )
@@ -277,6 +359,10 @@ class DockerREPL(NonIsolatedEnv):
             capture_output=True,
         )
 
+        # Start MCP servers in container if provided
+        if self.mcp_servers:
+            self._start_mcp_servers_in_container()
+
     def load_context(self, context_payload: dict | list | str):
         """Load context by writing to a file in the mounted workspace."""
         if isinstance(context_payload, str):
@@ -330,7 +416,60 @@ class DockerREPL(NonIsolatedEnv):
                 rlm_calls=calls,
             )
 
+    def _start_mcp_servers_in_container(self):
+        """Start MCP servers inside the Docker container."""
+        if not self.container_id:
+            raise RuntimeError("Container not started")
+
+        for server_name, config in self.mcp_servers.items():
+            server_type = config.get("type", "stdio")
+
+            if server_type == "stdio":
+                command = config.get("command")
+                args = config.get("args", [])
+
+                if not command:
+                    raise ValueError(f"MCP server '{server_name}' requires 'command' in config")
+
+                args_str = " ".join(f"'{arg}'" for arg in args)
+                full_cmd = f"{command} {args_str}"
+
+                result = subprocess.run(
+                    [
+                        "docker",
+                        "exec",
+                        "-d",
+                        self.container_id,
+                        "sh",
+                        "-c",
+                        f"nohup {full_cmd} > /tmp/mcp_{server_name}.log 2>&1 & echo $!",
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"Failed to start MCP server '{server_name}': {result.stderr}"
+                    )
+
+                pid = result.stdout.strip()
+                if not hasattr(self, "_mcp_pids"):
+                    self._mcp_pids = {}
+                self._mcp_pids[server_name] = pid
+
+            elif server_type in ("streamable-http", "sse"):
+                pass
+
     def cleanup(self):
+        if hasattr(self, "_mcp_pids") and self._mcp_pids:
+            for _server_name, pid in self._mcp_pids.items():
+                subprocess.run(
+                    ["docker", "exec", self.container_id, "kill", pid],
+                    capture_output=True,
+                )
+            self._mcp_pids.clear()
+
         if hasattr(self, "container_id") and self.container_id:
             subprocess.run(["docker", "stop", self.container_id], capture_output=True)
             self.container_id = None
