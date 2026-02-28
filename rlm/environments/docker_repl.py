@@ -315,6 +315,7 @@ class DockerREPL(NonIsolatedEnv):
         persistent: bool = False,
         depth: int = 1,
         mcp_servers: dict[str, dict] | None = None,
+        volumes: dict[str, str] | None = None,
         **kwargs,
     ):
         if persistent:
@@ -330,6 +331,7 @@ class DockerREPL(NonIsolatedEnv):
         self.proxy_thread: threading.Thread | None = None
         self.proxy_port: int = 0
         self.mcp_servers = mcp_servers
+        self.volumes = volumes or {}
         self.mcp_config_path: str | None = None
         base_dir = os.environ.get(
             "RLM_DOCKER_WORKSPACE_DIR", os.path.join(os.getcwd(), ".rlm_workspace")
@@ -365,6 +367,9 @@ class DockerREPL(NonIsolatedEnv):
         self.proxy_thread.start()
 
         # Start Docker container
+        extra_volumes = []
+        for host_path, container_path in self.volumes.items():
+            extra_volumes += ["-v", f"{host_path}:{container_path}"]
         result = subprocess.run(
             [
                 "docker",
@@ -373,6 +378,7 @@ class DockerREPL(NonIsolatedEnv):
                 "--rm",
                 "-v",
                 f"{self.temp_dir}:/workspace",
+                *extra_volumes,
                 "--add-host",
                 "host.docker.internal:host-gateway",
                 self.image,
