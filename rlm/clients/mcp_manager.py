@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import os
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,12 +28,30 @@ class MCPClientManager:
         self._configs = configs or {}
         self._sessions: dict[str, ClientSession] = {}
         self._tools: dict[str, MCPToolInfo] = {}
+        self._exit_stack: AsyncExitStack | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def connect_all(self) -> None:
-        for name, config in self._configs.items():
-            self._connect_server(name, config)
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._exit_stack = AsyncExitStack()
+
+        async def connect_all_async() -> None:
+            for name, config in self._configs.items():
+                await self._connect_server_async(name, config)
+
+        self._loop.run_until_complete(connect_all_async())
 
     def disconnect_all(self) -> None:
+        if self._exit_stack is not None:
+            try:
+                self._loop.run_until_complete(self._exit_stack.aclose())
+            except Exception:
+                pass
+            self._exit_stack = None
+        if self._loop is not None:
+            self._loop.close()
+            self._loop = None
         self._sessions.clear()
         self._tools.clear()
 
@@ -45,19 +65,23 @@ class MCPClientManager:
         tool_info = self._tools[name]
         session = self._sessions[tool_info.server_name]
 
-        return session.call_tool(name, arguments)
+        async def _call_tool() -> types.CallToolResult:
+            return await session.call_tool(name, arguments)
 
-    def _connect_server(self, name: str, config: dict[str, Any]) -> None:
+        result = self._loop.run_until_complete(_call_tool())
+        return result
+
+    async def _connect_server_async(self, name: str, config: dict[str, Any]) -> None:
         server_type = config.get("type", "stdio")
 
         if server_type == "stdio":
-            self._connect_stdio_server(name, config)
+            await self._connect_stdio_server_async(name, config)
         elif server_type in ("streamable-http", "sse"):
-            self._connect_http_server(name, config)
+            await self._connect_http_server_async(name, config)
         else:
             raise ValueError(f"Unknown MCP server type: {server_type}")
 
-    def _connect_stdio_server(self, name: str, config: dict[str, Any]) -> None:
+    async def _connect_stdio_server_async(self, name: str, config: dict[str, Any]) -> None:
         command = config.get("command")
         args = config.get("args", [])
         env = config.get("env", {})
@@ -71,35 +95,29 @@ class MCPClientManager:
             env=merged_env,
         )
 
-        import asyncio
+        stdio_transport = await self._exit_stack.enter_async_context(stdio_client(server_params))
+        read, write = stdio_transport
+        session = await self._exit_stack.enter_async_context(ClientSession(read, write))
+        await session.initialize()
+        self._sessions[name] = session
 
-        async def connect() -> None:
-            async with stdio_client(server_params) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    tools = await session.list_tools()
-                    self._sessions[name] = session
-                    self._register_tools(name, tools)
+        tools_result = await session.list_tools()
+        self._register_tools(name, tools_result)
 
-        asyncio.run(connect())
-
-    def _connect_http_server(self, name: str, config: dict[str, Any]) -> None:
+    async def _connect_http_server_async(self, name: str, config: dict[str, Any]) -> None:
         url = config.get("url")
         if not url:
             raise ValueError(f"MCP server {name} requires 'url' for HTTP transport")
 
-        import asyncio
+        transport = StreamableHTTPTransport(url=url)
+        read, write = await transport.connect()
+        session = ClientSession(read, write)
+        await self._exit_stack.enter_async_context(session)
+        await session.initialize()
+        self._sessions[name] = session
 
-        async def connect() -> None:
-            transport = StreamableHTTPTransport(url=url)
-            async with transport.connect() as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    tools = await session.list_tools()
-                    self._sessions[name] = session
-                    self._register_tools(name, tools)
-
-        asyncio.run(connect())
+        tools_result = await session.list_tools()
+        self._register_tools(name, tools_result)
 
     def _register_tools(self, server_name: str, tools_result: types.ListToolsResult) -> None:
         for tool in tools_result.tools:
