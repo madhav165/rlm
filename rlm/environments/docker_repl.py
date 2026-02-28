@@ -102,6 +102,7 @@ def _build_exec_script(
 import asyncio
 import json
 import base64
+from contextlib import AsyncExitStack
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
@@ -111,6 +112,8 @@ _mcp_configs = json.loads(base64.b64decode("'''
             + """").decode())
 _mcp_sessions = {}
 _mcp_tools = {}
+_exit_stack = AsyncExitStack()
+_mcp_loop = None
 
 async def _connect_mcp_server(name, config):
     server_type = config.get("type", "stdio")
@@ -122,8 +125,8 @@ async def _connect_mcp_server(name, config):
         merged_env = os.environ.copy()
         merged_env.update(env)
         server_params = StdioServerParameters(command=command, args=args, env=merged_env)
-        read, write = await stdio_client(server_params).__aenter__()
-        session = await ClientSession(read, write).__aenter__()
+        read, write = await _exit_stack.enter_async_context(stdio_client(server_params))
+        session = await _exit_stack.enter_async_context(ClientSession(read, write))
         await session.initialize()
         tools_result = await session.list_tools()
         for tool in tools_result.tools:
@@ -131,8 +134,8 @@ async def _connect_mcp_server(name, config):
         _mcp_sessions[name] = session
     elif server_type in ("streamable-http", "sse"):
         url = config.get("url")
-        read, write, _ = await streamable_http_client(url).__aenter__()
-        session = await ClientSession(read, write).__aenter__()
+        read, write, _ = await _exit_stack.enter_async_context(streamable_http_client(url))
+        session = await _exit_stack.enter_async_context(ClientSession(read, write))
         await session.initialize()
         tools_result = await session.list_tools()
         for tool in tools_result.tools:
@@ -140,19 +143,37 @@ async def _connect_mcp_server(name, config):
         _mcp_sessions[name] = session
 
 async def _connect_all_mcp():
+    await _exit_stack.__aenter__()
     for name, config in _mcp_configs.items():
         await _connect_mcp_server(name, config)
 
 def _init_mcp():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(_connect_all_mcp())
+    global _mcp_loop
+    _mcp_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_mcp_loop)
+    _mcp_loop.run_until_complete(_connect_all_mcp())
+    for tool_name in list(_mcp_tools.keys()):
+        def make_wrapper(name):
+            def wrapper(**kwargs):
+                return _call_mcp_tool(name, kwargs)
+            wrapper.__name__ = name
+            wrapper.__doc__ = _mcp_tools[name]["tool"].description
+            return wrapper
+        globals()[tool_name] = make_wrapper(tool_name)
+
+def _cleanup_mcp():
+    if _mcp_loop is not None and not _mcp_loop.is_closed():
+        try:
+            _mcp_loop.run_until_complete(_exit_stack.aclose())
+        except Exception:
+            pass
+        _mcp_loop.close()
 
 def _call_mcp_tool(name, arguments):
     if name not in _mcp_tools:
         return f"Error: Unknown tool: {{name}}"
     try:
-        result = _mcp_tools[name]["session"].call_tool(name, arguments)
+        result = _mcp_loop.run_until_complete(_mcp_tools[name]["session"].call_tool(name, arguments))
         if hasattr(result, "content") and result.content:
             texts = []
             for item in result.content:
@@ -165,15 +186,7 @@ def _call_mcp_tool(name, arguments):
     except Exception as e:
         return f"Error: MCP tool '{{name}}' failed: {{e}}"
 
-# Add MCP tools to globals
-for tool_name in list(_mcp_tools.keys()):
-    def make_wrapper(name):
-        def wrapper(**kwargs):
-            return _call_mcp_tool(name, kwargs)
-        wrapper.__name__ = name
-        wrapper.__doc__ = _mcp_tools[name]["tool"].description
-        return wrapper
-    globals()[tool_name] = make_wrapper(tool_name)
+_init_mcp()
 """
         )
 
@@ -192,7 +205,9 @@ STATE = "/workspace/state.dill"
 
 def llm_query(prompt, model=None):
     try:
-        r = requests.post(f"{{PROXY}}/llm_query", json={{"prompt": prompt, "model": model, "depth": {depth}}}, timeout=300)
+        r = requests.post(f"{{PROXY}}/llm_query", json={{"prompt": prompt, "model": model, "depth": {
+            depth
+        }}}, timeout=300)
         d = r.json()
         return d.get("response") or f"Error: {{d.get('error')}}"
     except Exception as e:
@@ -200,7 +215,9 @@ def llm_query(prompt, model=None):
 
 def llm_query_batched(prompts, model=None):
     try:
-        r = requests.post(f"{{PROXY}}/llm_query_batched", json={{"prompts": prompts, "model": model, "depth": {depth}}}, timeout=300)
+        r = requests.post(f"{{PROXY}}/llm_query_batched", json={{"prompts": prompts, "model": model, "depth": {
+            depth
+        }}}, timeout=300)
         d = r.json()
         return d.get("responses") or [f"Error: {{d.get('error')}}"] * len(prompts)
     except Exception as e:
@@ -244,9 +261,10 @@ def SHOW_VARS():
 
 _globals = {{"__builtins__": __builtins__, "__name__": "__main__", "llm_query": llm_query, "llm_query_batched": llm_query_batched, "FINAL_VAR": FINAL_VAR, "SHOW_VARS": SHOW_VARS}}
 
-# Initialize MCP servers and add tools to globals
-{"_init_mcp(); _create_mcp_tool_wrappers()" if mcp_config else ""}
-
+{"""for _tool_name in _mcp_tools.keys():
+    if _tool_name in globals():
+        _globals[_tool_name] = globals()[_tool_name]
+""" if mcp_config else ""}
 code = base64.b64decode("{code_b64}").decode()
 stdout_buf, stderr_buf = io.StringIO(), io.StringIO()
 old_stdout, old_stderr = sys.stdout, sys.stderr
@@ -269,7 +287,8 @@ if "context_0" in _locals:
 if "history_0" in _locals:
     _locals["history"] = _locals["history_0"]
 
-save_state(_locals)
+{"""_cleanup_mcp()
+""" if mcp_config else ""}save_state(_locals)
 print(json.dumps({{"stdout": stdout_buf.getvalue(), "stderr": stderr_buf.getvalue(), "locals": {{k: repr(v) for k, v in _locals.items() if not k.startswith("_")}}}}, ensure_ascii=False))
 '''
     )
@@ -366,9 +385,31 @@ class DockerREPL(NonIsolatedEnv):
 
         # Install dependencies
         subprocess.run(
-            ["docker", "exec", self.container_id, "pip", "install", "-q", "dill", "requests"],
+            [
+                "docker",
+                "exec",
+                self.container_id,
+                "pip",
+                "install",
+                "-q",
+                "dill",
+                "requests",
+                "mcp",
+                "uv",
+            ],
             capture_output=True,
         )
+
+        # Pre-install uvx-based MCP tools to avoid download noise at execution time
+        if self.mcp_servers:
+            for _config in self.mcp_servers.values():
+                if _config.get("type", "stdio") == "stdio" and _config.get("command") == "uvx":
+                    _args = _config.get("args", [])
+                    if _args:
+                        subprocess.run(
+                            ["docker", "exec", self.container_id, "uv", "tool", "install", _args[0]],
+                            capture_output=True,
+                        )
 
         # Start MCP servers in container if provided
         if self.mcp_servers:
@@ -397,7 +438,7 @@ class DockerREPL(NonIsolatedEnv):
         with self._calls_lock:
             self.pending_calls.clear()
 
-        script = _build_exec_script(code, self.proxy_port, self.depth)
+        script = _build_exec_script(code, self.proxy_port, self.depth, self.mcp_servers)
         result = subprocess.run(
             ["docker", "exec", self.container_id, "python", "-c", script],
             capture_output=True,
