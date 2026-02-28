@@ -12,6 +12,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
 
+from rlm.clients.mcp_manager import MCPClientManager
 from rlm.core.comms_utils import LMRequest, send_lm_request, send_lm_request_batched
 from rlm.core.types import REPLResult, RLMChatCompletion
 from rlm.environments.base_env import (
@@ -134,6 +135,7 @@ class LocalREPL(NonIsolatedEnv):
         subcall_fn: Callable[[str, str | None], RLMChatCompletion] | None = None,
         custom_tools: dict[str, Any] | None = None,
         custom_sub_tools: dict[str, Any] | None = None,
+        mcp_manager: MCPClientManager | None = None,
         compaction: bool = False,
         **kwargs,
     ):
@@ -147,6 +149,7 @@ class LocalREPL(NonIsolatedEnv):
         self._context_count: int = 0
         self._history_count: int = 0
         self.compaction = compaction
+        self.mcp_manager = mcp_manager
 
         # Custom tools: functions available in the REPL
         self.custom_tools = custom_tools or {}
@@ -204,6 +207,13 @@ class LocalREPL(NonIsolatedEnv):
             else:
                 # For non-callable values (constants, data), add to locals
                 self.locals[name] = value
+
+        # Add MCP tools to globals
+        # Each MCP tool is wrapped as a callable that invokes the MCP tool
+        if self.mcp_manager is not None:
+            mcp_tools = self.mcp_manager.get_tools()
+            for tool_name in mcp_tools:
+                self.globals[tool_name] = self._create_mcp_tool_wrapper(tool_name)
 
     def _final_var(self, variable_name: str | Any) -> str:
         """Return the value of a variable as a final answer for the main model, or stringify a direct value."""
@@ -341,6 +351,39 @@ class LocalREPL(NonIsolatedEnv):
 
         # Fall back to plain batched LM call if no recursive capability
         return self._llm_query_batched(prompts, model)
+
+    def _create_mcp_tool_wrapper(self, tool_name: str) -> Callable[..., Any]:
+        """Create a wrapper function for an MCP tool that calls it via the MCP manager."""
+
+        def mcp_tool_wrapper(*args: Any, **kwargs: Any) -> Any:
+            if self.mcp_manager is None:
+                return "Error: MCP manager not available"
+
+            # Build arguments dict from args and kwargs
+            # This is a simplification - in reality, we need to inspect the function signature
+            # For now, we'll pass whatever we get
+            arguments = kwargs.copy()
+            # If there are positional args, try to map them (naive approach)
+            # A more sophisticated approach would inspect the tool's inputSchema
+            if args:
+                arguments["_args"] = list(args)
+
+            try:
+                result = self.mcp_manager.call_tool(tool_name, arguments)
+                # Extract text content from result
+                if hasattr(result, "content") and result.content:
+                    texts = []
+                    for item in result.content:
+                        if hasattr(item, "text"):
+                            texts.append(item.text)
+                        else:
+                            texts.append(str(item))
+                    return "\n".join(texts) if texts else str(result)
+                return str(result)
+            except Exception as e:
+                return f"Error: MCP tool '{tool_name}' failed - {e}"
+
+        return mcp_tool_wrapper
 
     def load_context(self, context_payload: dict | list | str):
         """Load context into the environment as context_0 (and 'context' alias)."""

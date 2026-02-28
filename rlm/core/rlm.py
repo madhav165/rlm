@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from rlm.clients import BaseLM, get_client
+from rlm.clients.mcp_manager import MCPClientManager
 from rlm.core.lm_handler import LMHandler
 from rlm.core.types import (
     ClientBackend,
@@ -68,6 +69,7 @@ class RLM:
         persistent: bool = False,
         custom_tools: dict[str, Any] | None = None,
         custom_sub_tools: dict[str, Any] | None = None,
+        mcp_servers: dict[str, dict[str, Any]] | None = None,
         compaction: bool = False,
         compaction_threshold_pct: float = 0.85,
         on_subcall_start: Callable[[int, str, str], None] | None = None,
@@ -98,6 +100,8 @@ class RLM:
                 values are callable functions. These are injected into the REPL globals.
             custom_sub_tools: Dict of custom tools for sub-agents (llm_query calls). If None, inherits
                 from custom_tools. Pass an empty dict {} to disable tools for sub-agents.
+            mcp_servers: Dict of MCP server configurations. Keys are server names, values are configs.
+                Supports stdio (command, args, env) and HTTP (type: streamable-http, url).
             compaction: If True, keep full root model history in REPL variable `history` and compact
                 when root context reaches compaction_threshold_pct of the model's context limit.
             compaction_threshold_pct: When compaction is on, trigger summarization when root
@@ -129,6 +133,13 @@ class RLM:
         self.custom_tools = custom_tools
         # Sub-tools: if None, inherit from custom_tools; if {}, no tools for sub-agents
         self.custom_sub_tools = custom_sub_tools if custom_sub_tools is not None else custom_tools
+
+        # MCP servers: external MCP servers to connect to for tools
+        self.mcp_servers = mcp_servers
+        self._mcp_manager: MCPClientManager | None = None
+        if self.mcp_servers:
+            self._mcp_manager = MCPClientManager(self.mcp_servers)
+            self._mcp_manager.connect_all()
 
         self.compaction = compaction
         self.compaction_threshold_pct = compaction_threshold_pct
@@ -236,6 +247,9 @@ class RLM:
                 env_kwargs["custom_tools"] = self.custom_tools
             if self.custom_sub_tools is not None:
                 env_kwargs["custom_sub_tools"] = self.custom_sub_tools
+            # Pass MCP client manager to the environment
+            if self._mcp_manager is not None:
+                env_kwargs["mcp_manager"] = self._mcp_manager
             if self.compaction and self.environment_type == "local":
                 env_kwargs["compaction"] = True
             environment: BaseEnv = get_environment(self.environment_type, env_kwargs)
@@ -837,7 +851,10 @@ class RLM:
         return isinstance(env, SupportsPersistence)
 
     def close(self) -> None:
-        """Clean up persistent environment. Call when done with multi-turn conversations."""
+        """Clean up persistent environment and MCP connections. Call when done with multi-turn conversations."""
+        if self._mcp_manager is not None:
+            self._mcp_manager.disconnect_all()
+            self._mcp_manager = None
         if self._persistent_env is not None:
             if hasattr(self._persistent_env, "cleanup"):
                 self._persistent_env.cleanup()
