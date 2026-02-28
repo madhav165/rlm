@@ -129,6 +129,7 @@ def _build_exec_script(
 import asyncio
 import json
 import base64
+from contextlib import AsyncExitStack
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
@@ -138,6 +139,8 @@ _mcp_configs = json.loads(base64.b64decode("'
             + '").decode())
 _mcp_sessions = {}
 _mcp_tools = {}
+_exit_stack = AsyncExitStack()
+_mcp_loop = None
 
 async def _connect_mcp_server(name, config):
     server_type = config.get("type", "stdio")
@@ -149,8 +152,8 @@ async def _connect_mcp_server(name, config):
         merged_env = os.environ.copy()
         merged_env.update(env)
         server_params = StdioServerParameters(command=command, args=args, env=merged_env)
-        read, write = await stdio_client(server_params).__aenter__()
-        session = await ClientSession(read, write).__aenter__()
+        read, write = await _exit_stack.enter_async_context(stdio_client(server_params))
+        session = await _exit_stack.enter_async_context(ClientSession(read, write))
         await session.initialize()
         tools_result = await session.list_tools()
         for tool in tools_result.tools:
@@ -158,8 +161,8 @@ async def _connect_mcp_server(name, config):
         _mcp_sessions[name] = session
     elif server_type in ("streamable-http", "sse"):
         url = config.get("url")
-        read, write, _ = await streamable_http_client(url).__aenter__()
-        session = await ClientSession(read, write).__aenter__()
+        read, write, _ = await _exit_stack.enter_async_context(streamable_http_client(url))
+        session = await _exit_stack.enter_async_context(ClientSession(read, write))
         await session.initialize()
         tools_result = await session.list_tools()
         for tool in tools_result.tools:
@@ -167,19 +170,29 @@ async def _connect_mcp_server(name, config):
         _mcp_sessions[name] = session
 
 async def _connect_all_mcp():
+    await _exit_stack.__aenter__()
     for name, config in _mcp_configs.items():
         await _connect_mcp_server(name, config)
 
 def _init_mcp():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(_connect_all_mcp())
+    global _mcp_loop
+    _mcp_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_mcp_loop)
+    _mcp_loop.run_until_complete(_connect_all_mcp())
+
+def _cleanup_mcp():
+    if _mcp_loop is not None and not _mcp_loop.is_closed():
+        try:
+            _mcp_loop.run_until_complete(_exit_stack.aclose())
+        except Exception:
+            pass
+        _mcp_loop.close()
 
 def _call_mcp_tool(name, arguments):
     if name not in _mcp_tools:
         return f"Error: Unknown tool: {name}"
     try:
-        result = _mcp_tools[name]["session"].call_tool(name, arguments)
+        result = _mcp_loop.run_until_complete(_mcp_tools[name]["session"].call_tool(name, arguments))
         if hasattr(result, "content") and result.content:
             texts = []
             for item in result.content:
@@ -195,7 +208,7 @@ def _call_mcp_tool(name, arguments):
 # Initialize MCP servers
 _init_mcp()
 
-# Add MCP tools to globals
+# Add MCP tools to _globals so they are available in exec'd user code
 for tool_name in list(_mcp_tools.keys()):
     def make_wrapper(name):
         def wrapper(**kwargs):
@@ -203,7 +216,7 @@ for tool_name in list(_mcp_tools.keys()):
         wrapper.__name__ = name
         wrapper.__doc__ = _mcp_tools[name]["tool"].description
         return wrapper
-    globals()[tool_name] = make_wrapper(tool_name)
+    _globals[tool_name] = make_wrapper(tool_name)
 """
         )
 
@@ -358,7 +371,8 @@ if "context_0" in _locals:
 if "history_0" in _locals:
     _locals["history"] = _locals["history_0"]
 
-save_state(_locals)
+{"""_cleanup_mcp()
+""" if mcp_config else ""}save_state(_locals)
 
 result = {{
     "stdout": stdout_buf.getvalue(),
