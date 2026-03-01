@@ -98,7 +98,24 @@ def extract_tool_value(entry: Any) -> Any:
     return entry
 
 
-def _format_input_schema(schema: dict[str, Any]) -> tuple[str, list[str]]:
+def _get_param_type(param_info: dict[str, Any]) -> str:
+    """Get the Python type representation for a schema property."""
+    param_type = param_info.get("type", "any")
+
+    type_mapping = {
+        "string": "str",
+        "integer": "int",
+        "number": "float",
+        "boolean": "bool",
+        "array": "list",
+        "object": "dict",
+        "null": "None",
+    }
+
+    return type_mapping.get(param_type, str(param_type))
+
+
+def _format_input_schema(schema: dict[str, Any], indent: int = 0) -> tuple[str, list[str]]:
     """Render an MCP input schema as a (signature, param_descriptions) tuple."""
     props = schema.get("properties", {})
     required = set(schema.get("required", []))
@@ -106,15 +123,28 @@ def _format_input_schema(schema: dict[str, Any]) -> tuple[str, list[str]]:
         return "()", []
     params = []
     descriptions = []
+    indent_str = "    " * (indent + 1)
     for param_name, param_info in props.items():
-        type_str = param_info.get("type", "any")
+        type_str = _get_param_type(param_info)
         if param_name in required:
             params.append(f"{param_name}: {type_str}")
         else:
             params.append(f"{param_name}: {type_str} = None")
         desc = param_info.get("description")
         if desc:
-            descriptions.append(f"    {param_name}: {desc}")
+            descriptions.append(f"{indent_str}{param_name}: {desc}")
+        if param_info.get("type") == "object" and "properties" in param_info:
+            nested_sig, nested_descs = _format_input_schema(param_info, indent + 1)
+            if nested_descs:
+                descriptions.append(f"{indent_str}{param_name} object:")
+                descriptions.extend(nested_descs)
+        elif param_info.get("type") == "array" and "items" in param_info:
+            items_info = param_info["items"]
+            if items_info.get("type") == "object" and "properties" in items_info:
+                nested_sig, nested_descs = _format_input_schema(items_info, indent + 1)
+                if nested_descs:
+                    descriptions.append(f"{indent_str}{param_name} items:")
+                    descriptions.extend(nested_descs)
     return "(" + ", ".join(params) + ")", descriptions
 
 
