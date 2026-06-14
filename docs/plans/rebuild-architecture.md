@@ -4,130 +4,155 @@ This is a code-faithful architecture recommendation for `rlm` based on the curre
 
 ## Goal
 
-Build a small core that is explicit about boundaries:
+Keep the redesign close to the code that already exists, while making the hard boundaries explicit:
 
-- inference orchestration
-- client adapters
+- orchestration
+- protocol / typed data
 - execution environments
+- clients / backends
 - logging and metadata
-- shared types and protocol objects
+- shared prompt and parsing helpers
 
-The main design target is to keep recursive execution, model calls, and sandbox execution separable without inventing a large new hierarchy of packages.
+The main design target is to keep recursive execution, model calls, and sandbox execution separable without inventing extra top-level subsystems.
 
 ## Recommended Shape
 
-### 0. Split The Repository Into Two Explicit Domains
-
-The graph results show two distinct areas:
-
-- the RLM inference and execution engine
-- the structured UI/component library
-
-These should be treated as separate product surfaces with separate boundaries, even if they live in one repo.
-
-Why:
-
-- they change for different reasons
-- they have different dependency patterns
-- mixing them makes the core library harder to evolve cleanly
-
 ### 1. `rlm/core`
 
-Own all request lifecycle logic:
+This package should own the orchestration layer and stay focused on request lifecycle control.
 
-- completion entrypoints
-- recursive execution loop
-- routing to child calls
-- depth / iteration limits
-- retry and fallback policy
-- metadata envelope creation
+Keep here:
 
-This should be the only layer that knows how the RLM loop works end to end.
+- `rlm/core/rlm.py` for the recursive completion loop
+- `rlm/core/lm_handler.py` for LM request routing and handler lifecycle
+- `rlm/core/comms_utils.py` for socket framing and request/response transport helpers
+- `rlm/core/types.py` for the typed request/result/configuration objects
 
 Why:
 
-- keeps orchestration deterministic
-- prevents execution policy from leaking into clients or environments
-- makes the recursive loop easier to test in isolation
+- the current code already uses this split
+- orchestration and transport are tightly coupled
+- keeping them together avoids pushing control-plane logic into the environments
 
-### 2. `rlm/clients`
+### 2. `rlm/environments`
 
-Put every LM provider integration behind a narrow `BaseLM` interface.
+This package should own the execution body of the system.
 
-Each client should:
+Keep here:
 
-- accept a normalized request object
-- return a normalized completion object
-- track usage in a shared format
-- hide provider-specific auth, transport, and retries
-
-Why:
-
-- avoids provider logic spreading through the core
-- makes adding or replacing providers low risk
-- keeps the orchestration layer from depending on vendor APIs
-
-### 3. `rlm/environments`
-
-Treat environments as execution backends for code or tool-driven loops.
-
-Each environment should:
-
-- expose a stable execution contract
-- load context explicitly
-- provide `llm_query` and `rlm_query`
-- return one result envelope type
-- clean up all state on exit
+- `rlm/environments/base_env.py` for base classes and protocols
+- `rlm/environments/local_repl.py` for the in-process REPL runtime
+- `rlm/environments/modal_repl.py`, `docker_repl.py`, `daytona_repl.py`, `prime_repl.py`, `e2b_repl.py` for isolated backends
+- REPL state persistence
+- custom tools and MCP tool injection
+- `llm_query`, `llm_query_batched`, `rlm_query`, `rlm_query_batched`
+- `FINAL_VAR`, `SHOW_VARS`
+- context/history handling
 
 Why:
 
-- execution is a separate concern from model inference
-- isolated and non-isolated backends need different plumbing
-- environment implementations stay swappable if the interface is stable
+- the REPL is the execution environment, not a separate platform layer
+- recursive subcalls are exposed as environment functions, so they belong here
+- state persistence and tool injection are part of environment behavior, not core orchestration
 
-### 4. `rlm/core/types`
+### 3. `rlm/clients`
 
-Centralize all cross-cutting data structures:
+This package should remain the provider abstraction layer.
 
-- request / response payloads
-- usage summaries
-- iteration records
-- execution metadata
-- environment results
+Keep here:
 
-Why:
-
-- prevents type drift across modules
-- reduces conversion code
-- makes serialization and persistence straightforward
-
-### 5. Cross-Cutting Concerns as Modules, Not New Pillars
-
-The current code already has concrete places for the concerns that were previously split into separate top-level subsystems:
-
-- `rlm/utils/prompts.py` for prompt synthesis and metadata-driven prompt building
-- `rlm/utils/parsing.py` for code-block extraction and final-answer parsing
-- `rlm/logger/` for logging, iteration capture, and metadata persistence
-- `rlm/utils/exceptions.py` for runtime guardrails and failure modes
-- `rlm/environments/` for REPL state, persistence, cleanup, and nested-call behavior
-
-These concerns should stay as modules or internal subpackages unless they grow enough code to justify promotion.
+- `rlm/clients/base_lm.py`
+- provider-specific client implementations
+- model-specific auth, transport, retries, and usage tracking
 
 Why:
 
-- the repository already expresses these responsibilities without extra package layers
-- the current code favors direct functional boundaries over deep architectural layering
-- promoting every concern to its own top-level domain would make the plan less faithful to the code
+- this is already the natural boundary for backend differences
+- `BaseLM` is a useful abstraction and should stay narrow
+- orchestration should not import provider SDKs directly
+
+### 4. `rlm/utils`
+
+This package should hold shared helpers that are not stable enough to justify a new top-level domain.
+
+Keep here:
+
+- prompt synthesis helpers
+- code-block parsing and final-answer extraction
+- runtime guardrails / exceptions
+- token counting / context helpers
+- other small validation utilities
+
+Why:
+
+- the current repo already uses `utils` this way
+- these are supporting functions, not a separate architectural pillar
+- demoting them avoids the “junk drawer” problem at the top level
+
+### 5. `rlm/logger`
+
+This package should continue to own logging and metadata capture.
+
+Keep here:
+
+- iteration logging
+- execution metadata capture
+- trace/output persistence
+- verbose output helpers
+
+Why:
+
+- the repo already separates logging from orchestration
+- keeping trace capture here avoids inventing a separate provenance layer
+
+## What Should Stay Together
+
+These should remain together because the code already treats them as one cohesive responsibility:
+
+- `RLM` orchestration, request lifecycle, and recursion control
+- `LMHandler` startup/shutdown and request routing
+- socket protocol helpers and the handler transport path
+- REPL state, context, and `llm_query` / `rlm_query` helpers
+- persistence, custom tools, and MCP injection within environments
+- typed results and metadata objects that move between core and environments
+
+## What Should Be Separated
+
+Separate these boundaries because the code already shows them as different concerns:
+
+- orchestration vs provider-specific client code
+- orchestration vs REPL execution
+- shared typed objects vs behavior
+- logging/metadata capture vs core control flow
+- prompt-building helpers vs core request lifecycle
+- parsing helpers vs execution logic
+
+## What to Demote or Delete
+
+The earlier broader plan overfit the critique. These should not become new top-level packages:
+
+- `policy`
+- `prompting`
+- `state`
+- `streaming`
+- `provenance`
+- `lifecycle`
+
+Keep those as internal concerns inside `core`, `environments`, `utils`, or `logger` unless the codebase later grows enough to justify promotion.
+
+Why:
+
+- the current code does not warrant that many top-level pillars
+- the design should stay faithful to the repository as it exists
+- splitting too aggressively makes the plan less realistic and harder to implement
 
 ## Dependency Direction
 
 Use a strict inward dependency model:
 
-`clients` and `environments` depend on `core/types`
-
-`core` depends on `core/types` and abstract interfaces only
-
-`logger` depends on `core/types`, not vice versa
+- `clients` and `environments` depend on `core/types`
+- `core` depends on `core/types` and abstract interfaces only
+- `logger` depends on `core/types`, not vice versa
 
 Nothing in `core` should import provider SDKs or sandbox-specific machinery directly.
 
@@ -153,23 +178,6 @@ Why:
 - fewer special cases in recursive logic
 - easier to reason about failure and retry behavior
 
-## What I Would Avoid
-
-- provider SDK calls in orchestration code
-- environment-specific branching in the core loop
-- multiple overlapping metadata schemas
-- implicit globals for context or state
-- silent fallback behavior
-- pretending `core` and `core/types` are always cleanly separable; the boundary needs to be carefully designed so shared types do not become a dumping ground for policy
-- treating prompt formatting as a tiny utility when it is actually a model-aware step
-- allowing recursive execution to share mutable REPL state between parent and child calls
-- inventing a streaming subsystem unless the codebase actually grows streaming semantics
-
-Why:
-
-- each of those makes the system harder to extend and debug
-- the repo already shows that execution metadata and routing need to stay tightly controlled
-
 ## Practical Repo Layout
 
 ```text
@@ -192,27 +200,16 @@ rlm/
     prompts.py
     parsing.py
     exceptions.py
-ui/
-  components/
-  layout/
-  primitives/
+    token_utils.py
+  ui/
+    components/
+    layout/
+    primitives/
 ```
-
-## Why This Works
-
-This layout keeps the codebase aligned around the actual runtime boundaries:
-
-- model calls
-- recursive orchestration
-- execution environments
-- logger / metadata capture
-- shared protocol types
-
-That separation makes the library easier to extend without changing the core recursion model every time a new backend or environment is added.
 
 ## Synthesis
 
-The design is not really "more modules." It is a redefinition of the system around a few hard boundaries:
+The design is not really “more modules.” It is a redefinition of the system around a few hard boundaries:
 
 1. `core` decides what should happen.
 2. `utils/prompts` and `utils/parsing` decide how prompts and answers are shaped.
@@ -223,7 +220,7 @@ The design is not really "more modules." It is a redefinition of the system arou
 
 That is the actual shape of the runtime.
 
-The biggest synthesis from the critique is that recursive RLM is not just a completion engine with extra helpers. It is a stateful control system. The architecture should therefore treat:
+The key takeaway from the critique is that recursive RLM is not just a completion engine with extra helpers. It is a stateful control system. The architecture should therefore treat:
 
 - recursion as control flow
 - prompt synthesis as execution correctness
