@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from rlm.core.comms_utils import LMRequest, send_lm_request, send_lm_request_batched
 from rlm.core.types import REPLResult, RLMChatCompletion
 from rlm.environments.base_env import NonIsolatedEnv
+from rlm.environments.container_mcp import generate_mcp_init_code
 
 
 class LLMProxyHandler(BaseHTTPRequestHandler):
@@ -93,107 +94,10 @@ def _build_exec_script(
 ) -> str:
     """Build execution script for the container."""
     code_b64 = base64.b64encode(code.encode()).decode()
-    mcp_config_b64 = base64.b64encode(json.dumps(mcp_config or {}).encode()).decode()
 
     mcp_setup = ""
     if mcp_config:
-        mcp_setup = textwrap.dedent(
-            '''
-import asyncio
-import json
-import base64
-from contextlib import AsyncExitStack
-from mcp import ClientSession
-from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamable_http_client
-
-_mcp_configs = json.loads(base64.b64decode("'''
-            + mcp_config_b64
-            + """").decode())
-_mcp_sessions = {}
-_mcp_tools = {}
-_exit_stack = AsyncExitStack()
-_mcp_loop = None
-
-async def _connect_mcp_server(name, config):
-    server_type = config.get("type", "stdio")
-    if server_type == "stdio":
-        command = config.get("command")
-        args = config.get("args", [])
-        env = config.get("env", {})
-        import os
-        merged_env = os.environ.copy()
-        merged_env.update(env)
-        server_params = StdioServerParameters(command=command, args=args, env=merged_env)
-        read, write = await _exit_stack.enter_async_context(stdio_client(server_params))
-        session = await _exit_stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
-        tools_result = await session.list_tools()
-        for tool in tools_result.tools:
-            _mcp_tools[tool.name] = {"session": session, "tool": tool}
-        _mcp_sessions[name] = session
-    elif server_type in ("streamable-http", "sse"):
-        url = config.get("url")
-        read, write, _ = await _exit_stack.enter_async_context(streamable_http_client(url))
-        session = await _exit_stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
-        tools_result = await session.list_tools()
-        for tool in tools_result.tools:
-            _mcp_tools[tool.name] = {"session": session, "tool": tool}
-        _mcp_sessions[name] = session
-
-async def _connect_all_mcp():
-    await _exit_stack.__aenter__()
-    for name, config in _mcp_configs.items():
-        await _connect_mcp_server(name, config)
-
-def _init_mcp():
-    global _mcp_loop
-    _mcp_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(_mcp_loop)
-    _mcp_loop.run_until_complete(_connect_all_mcp())
-    for tool_name in list(_mcp_tools.keys()):
-        def make_wrapper(name):
-            tool = _mcp_tools[name]["tool"]
-            props = list((tool.inputSchema.get("properties") or {}).keys())
-            def wrapper(*args, **kwargs):
-                for i, arg in enumerate(args):
-                    if i < len(props):
-                        kwargs[props[i]] = arg
-                return _call_mcp_tool(name, kwargs)
-            wrapper.__name__ = name
-            wrapper.__doc__ = tool.description
-            return wrapper
-        globals()[tool_name] = make_wrapper(tool_name)
-
-def _cleanup_mcp():
-    if _mcp_loop is not None and not _mcp_loop.is_closed():
-        try:
-            _mcp_loop.run_until_complete(_exit_stack.aclose())
-        except Exception:
-            pass
-        _mcp_loop.close()
-
-def _call_mcp_tool(name, arguments):
-    if name not in _mcp_tools:
-        return f"Error: Unknown tool: {{name}}"
-    try:
-        result = _mcp_loop.run_until_complete(_mcp_tools[name]["session"].call_tool(name, arguments))
-        if hasattr(result, "content") and result.content:
-            texts = []
-            for item in result.content:
-                if hasattr(item, "text"):
-                    texts.append(item.text)
-                else:
-                    texts.append(str(item))
-            return "\\n".join(texts) if texts else str(result)
-        return str(result)
-    except Exception as e:
-        return f"Error: MCP tool '{{name}}' failed: {{e}}"
-
-_init_mcp()
-"""
-        )
+        mcp_setup = generate_mcp_init_code(mcp_config, globals_target="globals")
 
     return textwrap.dedent(
         f'''
@@ -266,10 +170,14 @@ def SHOW_VARS():
 
 _globals = {{"__builtins__": __builtins__, "__name__": "__main__", "llm_query": llm_query, "llm_query_batched": llm_query_batched, "FINAL_VAR": FINAL_VAR, "SHOW_VARS": SHOW_VARS}}
 
-{"""for _tool_name in _mcp_tools.keys():
+{
+            """for _tool_name in _mcp_tools.keys():
     if _tool_name in globals():
         _globals[_tool_name] = globals()[_tool_name]
-""" if mcp_config else ""}
+"""
+            if mcp_config
+            else ""
+        }
 code = base64.b64decode("{code_b64}").decode()
 stdout_buf, stderr_buf = io.StringIO(), io.StringIO()
 old_stdout, old_stderr = sys.stdout, sys.stderr
@@ -292,8 +200,12 @@ if "context_0" in _locals:
 if "history_0" in _locals:
     _locals["history"] = _locals["history_0"]
 
-{"""_cleanup_mcp()
-""" if mcp_config else ""}save_state(_locals)
+{
+            """_cleanup_mcp()
+"""
+            if mcp_config
+            else ""
+        }save_state(_locals)
 print(json.dumps({{"stdout": stdout_buf.getvalue(), "stderr": stderr_buf.getvalue(), "locals": {{k: repr(v) for k, v in _locals.items() if not k.startswith("_")}}}}, ensure_ascii=False))
 '''
     )
@@ -418,7 +330,15 @@ class DockerREPL(NonIsolatedEnv):
                     _args = _config.get("args", [])
                     if _args:
                         subprocess.run(
-                            ["docker", "exec", self.container_id, "uv", "tool", "install", _args[0]],
+                            [
+                                "docker",
+                                "exec",
+                                self.container_id,
+                                "uv",
+                                "tool",
+                                "install",
+                                _args[0],
+                            ],
                             capture_output=True,
                         )
 
@@ -428,8 +348,14 @@ class DockerREPL(NonIsolatedEnv):
             for c in self.mcp_servers.values()
         ):
             subprocess.run(
-                ["docker", "exec", self.container_id, "sh", "-c",
-                 "apt-get update -qq && apt-get install -y -q nodejs npm"],
+                [
+                    "docker",
+                    "exec",
+                    self.container_id,
+                    "sh",
+                    "-c",
+                    "apt-get update -qq && apt-get install -y -q nodejs npm",
+                ],
                 capture_output=True,
             )
             for _config in self.mcp_servers.values():

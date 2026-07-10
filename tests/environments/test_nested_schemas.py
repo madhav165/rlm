@@ -4,10 +4,7 @@ Tests for nested JSON schema handling in custom tools.
 Run with: uv run pytest tests/environments/test_nested_schemas.py -v
 """
 
-import pytest
-
-from rlm.environments.base_env import format_tools_for_prompt
-from rlm.environments.base_env import _format_input_schema
+from rlm.environments.base_env import _format_input_schema, format_tools_for_prompt
 
 
 class TestNestedSchemaRendering:
@@ -204,6 +201,7 @@ class TestNestedSchemaRendering:
     def test_local_repl_nested_wrapper(self):
         """Test LocalREPL wrapper with nested schemas."""
         from unittest.mock import Mock
+
         from rlm.environments.local_repl import LocalREPL
 
         mock_manager = Mock()

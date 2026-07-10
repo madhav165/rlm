@@ -25,6 +25,7 @@ from rlm.core.comms_utils import LMRequest, send_lm_request, send_lm_request_bat
 from rlm.core.types import REPLResult, RLMChatCompletion
 from rlm.environments.base_env import IsolatedEnv
 from rlm.environments.constants import APT_PACKAGES, PIP_PACKAGES
+from rlm.environments.container_mcp import generate_mcp_init_code
 
 load_dotenv()
 
@@ -123,106 +124,7 @@ def _build_exec_script(
     # Generate MCP setup code if configured
     mcp_code = ""
     if mcp_config:
-        mcp_code = textwrap.dedent(
-            """
-import asyncio
-import json
-import base64
-from contextlib import AsyncExitStack
-from mcp import ClientSession
-from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamable_http_client
-
-_mcp_configs = json.loads(base64.b64decode("'
-            + base64.b64encode(json.dumps(mcp_config).encode()).decode()
-            + '").decode())
-_mcp_sessions = {}
-_mcp_tools = {}
-_exit_stack = AsyncExitStack()
-_mcp_loop = None
-
-async def _connect_mcp_server(name, config):
-    server_type = config.get("type", "stdio")
-    if server_type == "stdio":
-        command = config.get("command")
-        args = config.get("args", [])
-        env = config.get("env", {})
-        import os
-        merged_env = os.environ.copy()
-        merged_env.update(env)
-        server_params = StdioServerParameters(command=command, args=args, env=merged_env)
-        read, write = await _exit_stack.enter_async_context(stdio_client(server_params))
-        session = await _exit_stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
-        tools_result = await session.list_tools()
-        for tool in tools_result.tools:
-            _mcp_tools[tool.name] = {"session": session, "tool": tool}
-        _mcp_sessions[name] = session
-    elif server_type in ("streamable-http", "sse"):
-        url = config.get("url")
-        read, write, _ = await _exit_stack.enter_async_context(streamable_http_client(url))
-        session = await _exit_stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
-        tools_result = await session.list_tools()
-        for tool in tools_result.tools:
-            _mcp_tools[tool.name] = {"session": session, "tool": tool}
-        _mcp_sessions[name] = session
-
-async def _connect_all_mcp():
-    await _exit_stack.__aenter__()
-    for name, config in _mcp_configs.items():
-        await _connect_mcp_server(name, config)
-
-def _init_mcp():
-    global _mcp_loop
-    _mcp_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(_mcp_loop)
-    _mcp_loop.run_until_complete(_connect_all_mcp())
-
-def _cleanup_mcp():
-    if _mcp_loop is not None and not _mcp_loop.is_closed():
-        try:
-            _mcp_loop.run_until_complete(_exit_stack.aclose())
-        except Exception:
-            pass
-        _mcp_loop.close()
-
-def _call_mcp_tool(name, arguments):
-    if name not in _mcp_tools:
-        return f"Error: Unknown tool: {name}"
-    try:
-        result = _mcp_loop.run_until_complete(_mcp_tools[name]["session"].call_tool(name, arguments))
-        if hasattr(result, "content") and result.content:
-            texts = []
-            for item in result.content:
-                if hasattr(item, "text"):
-                    texts.append(item.text)
-                else:
-                    texts.append(str(item))
-            return "\\n".join(texts) if texts else str(result)
-        return str(result)
-    except Exception as e:
-        return f"Error: MCP tool '{name}' failed: {e}"
-
-# Initialize MCP servers
-_init_mcp()
-
-# Add MCP tools to _globals so they are available in exec'd user code
-for tool_name in list(_mcp_tools.keys()):
-    def make_wrapper(name):
-        tool = _mcp_tools[name]["tool"]
-        props = list((tool.inputSchema.get("properties") or {}).keys())
-        def wrapper(*args, **kwargs):
-            for i, arg in enumerate(args):
-                if i < len(props):
-                    kwargs[props[i]] = arg
-            return _call_mcp_tool(name, kwargs)
-        wrapper.__name__ = name
-        wrapper.__doc__ = tool.description
-        return wrapper
-    _globals[tool_name] = make_wrapper(tool_name)
-"""
-        )
+        mcp_code = generate_mcp_init_code(mcp_config)
 
     return textwrap.dedent(
         f'''
@@ -375,8 +277,12 @@ if "context_0" in _locals:
 if "history_0" in _locals:
     _locals["history"] = _locals["history_0"]
 
-{"""_cleanup_mcp()
-""" if mcp_config else ""}save_state(_locals)
+{
+            """_cleanup_mcp()
+"""
+            if mcp_config
+            else ""
+        }save_state(_locals)
 
 result = {{
     "stdout": stdout_buf.getvalue(),
