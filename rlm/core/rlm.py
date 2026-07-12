@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from rlm.clients import BaseLM, get_client
+from rlm.clients.mcp_manager import MCPClientManager
 from rlm.core.lm_handler import LMHandler
 from rlm.core.types import (
     ClientBackend,
@@ -68,6 +69,7 @@ class RLM:
         persistent: bool = False,
         custom_tools: dict[str, Any] | None = None,
         custom_sub_tools: dict[str, Any] | None = None,
+        mcp_servers: dict[str, dict[str, Any]] | None = None,
         compaction: bool = False,
         compaction_threshold_pct: float = 0.85,
         on_subcall_start: Callable[[int, str, str], None] | None = None,
@@ -98,6 +100,8 @@ class RLM:
                 values are callable functions. These are injected into the REPL globals.
             custom_sub_tools: Dict of custom tools for sub-agents (llm_query calls). If None, inherits
                 from custom_tools. Pass an empty dict {} to disable tools for sub-agents.
+            mcp_servers: Dict of MCP server configurations. Keys are server names, values are configs.
+                Supports stdio (command, args, env) and HTTP (type: streamable-http, url).
             compaction: If True, keep full root model history in REPL variable `history` and compact
                 when root context reaches compaction_threshold_pct of the model's context limit.
             compaction_threshold_pct: When compaction is on, trigger summarization when root
@@ -129,6 +133,13 @@ class RLM:
         self.custom_tools = custom_tools
         # Sub-tools: if None, inherit from custom_tools; if {}, no tools for sub-agents
         self.custom_sub_tools = custom_sub_tools if custom_sub_tools is not None else custom_tools
+
+        # MCP servers: external MCP servers to connect to for tools
+        self.mcp_servers = mcp_servers
+        self._mcp_manager: MCPClientManager | None = None
+        if self.mcp_servers:
+            self._mcp_manager = MCPClientManager(self.mcp_servers)
+            self._mcp_manager.connect_all()
 
         self.compaction = compaction
         self.compaction_threshold_pct = compaction_threshold_pct
@@ -228,14 +239,22 @@ class RLM:
             env_kwargs["lm_handler_address"] = (lm_handler.host, lm_handler.port)
             env_kwargs["context_payload"] = prompt
             env_kwargs["depth"] = self.depth + 1  # Environment depth is RLM depth + 1
-            # For local environment with max_depth > 1, pass subcall callback for recursive RLM calls
-            if self.environment_type == "local" and self.max_depth > 1:
+            # Environments with a host callback can spawn recursive RLM calls.
+            if self.environment_type in ("local", "docker") and self.max_depth > 1:
                 env_kwargs["subcall_fn"] = self._subcall
             # Pass custom tools to the environment
             if self.custom_tools is not None:
                 env_kwargs["custom_tools"] = self.custom_tools
             if self.custom_sub_tools is not None:
                 env_kwargs["custom_sub_tools"] = self.custom_sub_tools
+            # Pass MCP config to the environment
+            # LocalREPL uses a shared MCPClientManager; isolated envs (Docker, Modal, Prime)
+            # connect their own MCP clients inside the sandbox using the raw config dict.
+            if self.mcp_servers is not None:
+                if self.environment_type == "local":
+                    env_kwargs["mcp_manager"] = self._mcp_manager
+                else:
+                    env_kwargs["mcp_servers"] = self.mcp_servers
             if self.compaction and self.environment_type == "local":
                 env_kwargs["compaction"] = True
             environment: BaseEnv = get_environment(self.environment_type, env_kwargs)
@@ -256,10 +275,22 @@ class RLM:
         up the initial message history.
         """
         metadata = QueryMetadata(prompt)
+
+        tools_for_prompt = self.custom_tools.copy() if self.custom_tools else {}
+
+        if self._mcp_manager is not None:
+            for tool_name, tool_info in self._mcp_manager.get_tools().items():
+                if tool_name not in tools_for_prompt:
+                    tools_for_prompt[tool_name] = {
+                        "tool": f"MCP tool from {tool_info.server_name}",
+                        "description": tool_info.description or f"MCP tool: {tool_name}",
+                        "input_schema": tool_info.input_schema,
+                    }
+
         message_history = build_rlm_system_prompt(
             system_prompt=self.system_prompt,
             query_metadata=metadata,
-            custom_tools=self.custom_tools,
+            custom_tools=tools_for_prompt,
         )
         if self.compaction:
             message_history[0]["content"] += (
@@ -616,7 +647,7 @@ class RLM:
         """
         current_prompt = message_history + [
             {
-                "role": "assistant",
+                "role": "user",
                 "content": "Please provide a final answer to the user's question based on the information provided.",
             }
         ]
@@ -765,6 +796,7 @@ class RLM:
             # Propagate custom tools to children (sub_tools become the child's tools)
             custom_tools=self.custom_sub_tools,
             custom_sub_tools=self.custom_sub_tools,
+            mcp_servers=self.mcp_servers,
             # Propagate callbacks to children for nested tracking
             on_subcall_start=self.on_subcall_start,
             on_subcall_complete=self.on_subcall_complete,
@@ -837,7 +869,10 @@ class RLM:
         return isinstance(env, SupportsPersistence)
 
     def close(self) -> None:
-        """Clean up persistent environment. Call when done with multi-turn conversations."""
+        """Clean up persistent environment and MCP connections. Call when done with multi-turn conversations."""
+        if self._mcp_manager is not None:
+            self._mcp_manager.disconnect_all()
+            self._mcp_manager = None
         if self._persistent_env is not None:
             if hasattr(self._persistent_env, "cleanup"):
                 self._persistent_env.cleanup()

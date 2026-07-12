@@ -25,6 +25,7 @@ from rlm.core.comms_utils import LMRequest, send_lm_request, send_lm_request_bat
 from rlm.core.types import REPLResult, RLMChatCompletion
 from rlm.environments.base_env import IsolatedEnv
 from rlm.environments.constants import APT_PACKAGES, PIP_PACKAGES
+from rlm.environments.container_mcp import generate_mcp_init_code
 
 load_dotenv()
 
@@ -111,12 +112,19 @@ if __name__ == "__main__":
 # =============================================================================
 
 
-def _build_exec_script(code: str, broker_port: int = 8888, depth: int = 1) -> str:
+def _build_exec_script(
+    code: str, broker_port: int = 8888, depth: int = 1, mcp_config: dict | None = None
+) -> str:
     """
     Build a script that executes code with state persistence.
     LLM queries go through the local broker server.
     """
     code_b64 = base64.b64encode(code.encode()).decode()
+
+    # Generate MCP setup code if configured
+    mcp_code = ""
+    if mcp_config:
+        mcp_code = generate_mcp_init_code(mcp_config)
 
     return textwrap.dedent(
         f'''
@@ -240,6 +248,9 @@ _globals = {{
     "SHOW_VARS": SHOW_VARS,
 }}
 
+# Initialize MCP servers if configured
+{mcp_code}
+
 code = base64.b64decode("{code_b64}").decode()
 
 stdout_buf = io.StringIO()
@@ -266,7 +277,12 @@ if "context_0" in _locals:
 if "history_0" in _locals:
     _locals["history"] = _locals["history_0"]
 
-save_state(_locals)
+{
+            """_cleanup_mcp()
+"""
+            if mcp_config
+            else ""
+        }save_state(_locals)
 
 result = {{
     "stdout": stdout_buf.getvalue(),
@@ -301,6 +317,7 @@ class PrimeREPL(IsolatedEnv):
         network_access: bool = True,
         persistent: bool = False,
         depth: int = 1,
+        mcp_servers: dict[str, dict] | None = None,
         **kwargs: Any,
     ):
         super().__init__(persistent=persistent, depth=depth, **kwargs)
@@ -315,6 +332,7 @@ class PrimeREPL(IsolatedEnv):
         self.timeout_minutes = timeout_minutes
         self.lm_handler_address = lm_handler_address
         self.network_access = network_access
+        self.mcp_servers = mcp_servers
 
         # Client and sandbox state
         self.client: SandboxClient | None = None
@@ -523,7 +541,7 @@ class PrimeREPL(IsolatedEnv):
             self.pending_llm_calls.clear()
 
         # Build and write the script
-        script = _build_exec_script(code, self.BROKER_PORT, self.depth)
+        script = _build_exec_script(code, self.BROKER_PORT, self.depth, self.mcp_servers)
         script_b64 = base64.b64encode(script.encode()).decode()
         self.client.execute_command(
             self.sandbox_id,

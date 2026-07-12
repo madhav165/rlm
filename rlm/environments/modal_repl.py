@@ -11,6 +11,7 @@ from rlm.core.comms_utils import LMRequest, send_lm_request, send_lm_request_bat
 from rlm.core.types import REPLResult, RLMChatCompletion
 from rlm.environments.base_env import IsolatedEnv
 from rlm.environments.constants import APT_PACKAGES, PIP_PACKAGES
+from rlm.environments.container_mcp import generate_mcp_init_code
 
 # =============================================================================
 # Default Modal Image
@@ -112,12 +113,19 @@ if __name__ == "__main__":
 # =============================================================================
 
 
-def _build_exec_script(code: str, broker_port: int = 8080, depth: int = 1) -> str:
+def _build_exec_script(
+    code: str, broker_port: int = 8080, depth: int = 1, mcp_config: dict | None = None
+) -> str:
     """
     Build a script that executes code with state persistence.
     LLM queries go through the local broker server.
     """
     code_b64 = base64.b64encode(code.encode()).decode()
+
+    # Generate MCP setup code if configured
+    mcp_code = ""
+    if mcp_config:
+        mcp_code = generate_mcp_init_code(mcp_config)
 
     return textwrap.dedent(
         f'''
@@ -241,6 +249,9 @@ _globals = {{
     "SHOW_VARS": SHOW_VARS,
 }}
 
+# Initialize MCP servers if configured
+{mcp_code}
+
 code = base64.b64decode("{code_b64}").decode()
 
 stdout_buf = io.StringIO()
@@ -267,7 +278,12 @@ if "context_0" in _locals:
 if "history_0" in _locals:
     _locals["history"] = _locals["history_0"]
 
-save_state(_locals)
+{
+            """_cleanup_mcp()
+"""
+            if mcp_config
+            else ""
+        }save_state(_locals)
 
 result = {{
     "stdout": stdout_buf.getvalue(),
@@ -301,6 +317,7 @@ class ModalREPL(IsolatedEnv):
         setup_code: str | None = None,
         persistent: bool = False,
         depth: int = 1,
+        mcp_servers: dict[str, dict] | None = None,
         **kwargs,
     ):
         if persistent:
@@ -312,6 +329,7 @@ class ModalREPL(IsolatedEnv):
         self.app_name = app_name
         self.timeout = timeout
         self.lm_handler_address = lm_handler_address
+        self.mcp_servers = mcp_servers
 
         self.image = image or get_default_image()
 
@@ -323,6 +341,7 @@ class ModalREPL(IsolatedEnv):
         self.poller_stop = threading.Event()
         self.pending_llm_calls: list[RLMChatCompletion] = []
         self._calls_lock = threading.Lock()
+        self._mcp_processes: list = []
 
         self.setup()
 
@@ -350,6 +369,36 @@ class ModalREPL(IsolatedEnv):
             "-c",
             _BROKER_SCRIPT,
         )
+
+        # Start MCP servers in the sandbox if configured
+        if self.mcp_servers:
+            for server_name, config in self.mcp_servers.items():
+                server_type = config.get("type", "stdio")
+                if server_type == "stdio":
+                    command = config.get("command")
+                    args = config.get("args", [])
+                    env = config.get("env", {})
+
+                    if not command:
+                        raise ValueError(f"MCP server '{server_name}' requires 'command' in config")
+
+                    env_vars = " ".join(f"-e {k}={v}" for k, v in env.items())
+                    args_str = " ".join(f"'{arg}'" for arg in args)
+
+                    # Start MCP server in background
+                    cmd = f"nohup {command} {args_str} > /tmp/mcp_{server_name}.log 2>&1 & echo $!"
+                    if env:
+                        cmd = f"sh -c 'export {env_vars} && {cmd}'"
+                    else:
+                        cmd = f"sh -c '{cmd}'"
+
+                    proc = self.sandbox.exec("bash", "-c", cmd)
+                    try:
+                        output = proc.stdout.read().strip()
+                        if output:
+                            self._mcp_processes.append(output)
+                    except Exception:
+                        pass
 
         # Wait for broker to be ready
         time.sleep(2)
@@ -456,7 +505,7 @@ class ModalREPL(IsolatedEnv):
             self.pending_llm_calls.clear()
 
         # Build and execute the script
-        script = _build_exec_script(code, self.BROKER_PORT, self.depth)
+        script = _build_exec_script(code, self.BROKER_PORT, self.depth, self.mcp_servers)
         process = self.sandbox.exec("python", "-c", script)
 
         # Read output
@@ -501,6 +550,15 @@ class ModalREPL(IsolatedEnv):
             self.poller_thread = None
 
         if self.sandbox is not None:
+            # Kill MCP processes if any
+            if hasattr(self, "_mcp_processes") and self._mcp_processes:
+                for pid in self._mcp_processes:
+                    try:
+                        self.sandbox.exec("kill", str(pid))
+                    except Exception:
+                        pass
+                self._mcp_processes.clear()
+
             try:
                 self.sandbox.terminate()
             except Exception:

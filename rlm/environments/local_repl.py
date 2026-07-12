@@ -12,6 +12,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
 
+from rlm.clients.mcp_manager import MCPClientManager
 from rlm.core.comms_utils import LMRequest, send_lm_request, send_lm_request_batched
 from rlm.core.types import REPLResult, RLMChatCompletion
 from rlm.environments.base_env import (
@@ -134,6 +135,7 @@ class LocalREPL(NonIsolatedEnv):
         subcall_fn: Callable[[str, str | None], RLMChatCompletion] | None = None,
         custom_tools: dict[str, Any] | None = None,
         custom_sub_tools: dict[str, Any] | None = None,
+        mcp_manager: MCPClientManager | None = None,
         compaction: bool = False,
         **kwargs,
     ):
@@ -147,6 +149,7 @@ class LocalREPL(NonIsolatedEnv):
         self._context_count: int = 0
         self._history_count: int = 0
         self.compaction = compaction
+        self.mcp_manager = mcp_manager
 
         # Custom tools: functions available in the REPL
         self.custom_tools = custom_tools or {}
@@ -204,6 +207,22 @@ class LocalREPL(NonIsolatedEnv):
             else:
                 # For non-callable values (constants, data), add to locals
                 self.locals[name] = value
+
+        # Add MCP tools to globals
+        # Each MCP tool is wrapped as a callable that invokes the MCP tool
+        # Track them separately so we can restore after code execution
+        self._mcp_tool_wrappers: dict[str, Callable[..., Any]] = {}
+        if self.mcp_manager is not None:
+            mcp_tools = self.mcp_manager.get_tools()
+            for tool_name, tool_info in mcp_tools.items():
+                if tool_name in RESERVED_TOOL_NAMES:
+                    raise ValueError(
+                        f"MCP tool '{tool_name}' conflicts with reserved name. "
+                        f"Reserved names: {RESERVED_TOOL_NAMES}"
+                    )
+                wrapper = self._create_mcp_tool_wrapper(tool_name, tool_info.input_schema)
+                self.globals[tool_name] = wrapper
+                self._mcp_tool_wrappers[tool_name] = wrapper
 
     def _final_var(self, variable_name: str | Any) -> str:
         """Return the value of a variable as a final answer for the main model, or stringify a direct value."""
@@ -342,6 +361,42 @@ class LocalREPL(NonIsolatedEnv):
         # Fall back to plain batched LM call if no recursive capability
         return self._llm_query_batched(prompts, model)
 
+    def _create_mcp_tool_wrapper(
+        self, tool_name: str, input_schema: dict[str, Any]
+    ) -> Callable[..., Any]:
+        """Create a wrapper function for an MCP tool that calls it via the MCP manager."""
+
+        def mcp_tool_wrapper(*args: Any, **kwargs: Any) -> Any:
+            if self.mcp_manager is None:
+                return "Error: MCP manager not available"
+
+            arguments = kwargs.copy()
+
+            if args:
+                properties = input_schema.get("properties", {})
+                prop_names = list(properties.keys())
+
+                for i, arg in enumerate(args):
+                    if i < len(prop_names):
+                        prop_name = prop_names[i]
+                        arguments[prop_name] = arg
+
+            try:
+                result = self.mcp_manager.call_tool(tool_name, arguments)
+                if hasattr(result, "content") and result.content:
+                    texts = []
+                    for item in result.content:
+                        if hasattr(item, "text"):
+                            texts.append(item.text)
+                        else:
+                            texts.append(str(item))
+                    return "\n".join(texts) if texts else str(result)
+                return str(result)
+            except Exception as e:
+                return f"Error: MCP tool '{tool_name}' failed - {e}"
+
+        return mcp_tool_wrapper
+
     def load_context(self, context_payload: dict | list | str):
         """Load context into the environment as context_0 (and 'context' alias)."""
         self.add_context(context_payload, 0)
@@ -478,6 +533,10 @@ class LocalREPL(NonIsolatedEnv):
                 self.locals["history"] = self.locals["history_0"]
             elif name == "history" and self.compaction:
                 self.locals["history"] = self._compaction_history
+
+        # Restore MCP tool wrappers in case user code overwrote them
+        for tool_name, wrapper in self._mcp_tool_wrappers.items():
+            self.globals[tool_name] = wrapper
 
     def execute_code(self, code: str) -> REPLResult:
         """Execute code in the persistent namespace and return result."""

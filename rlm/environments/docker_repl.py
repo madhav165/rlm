@@ -15,11 +15,13 @@ import tempfile
 import textwrap
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from rlm.core.comms_utils import LMRequest, send_lm_request, send_lm_request_batched
 from rlm.core.types import REPLResult, RLMChatCompletion
 from rlm.environments.base_env import NonIsolatedEnv
+from rlm.environments.container_mcp import generate_mcp_init_code
 
 
 class LLMProxyHandler(BaseHTTPRequestHandler):
@@ -29,6 +31,7 @@ class LLMProxyHandler(BaseHTTPRequestHandler):
     pending_calls: list[RLMChatCompletion] = []
     lock: threading.Lock = threading.Lock()
     depth: int = 1
+    subcall_fn: Callable[[str, str | None], RLMChatCompletion] | None = None
 
     def log_message(self, *args):
         pass
@@ -40,6 +43,10 @@ class LLMProxyHandler(BaseHTTPRequestHandler):
             result = self._handle_single(body)
         elif self.path == "/llm_query_batched":
             result = self._handle_batched(body)
+        elif self.path == "/rlm_query":
+            result = self._handle_recursive(body)
+        elif self.path == "/rlm_query_batched":
+            result = self._handle_recursive_batched(body)
         else:
             self._respond(404, {"error": "Not found"})
             return
@@ -87,10 +94,46 @@ class LLMProxyHandler(BaseHTTPRequestHandler):
 
         return {"responses": results}
 
+    def _handle_recursive(self, body: dict) -> dict:
+        if self.subcall_fn is None:
+            return self._handle_single(body)
 
-def _build_exec_script(code: str, proxy_port: int, depth: int = 1) -> str:
+        try:
+            completion = self.subcall_fn(body.get("prompt"), body.get("model"))
+        except Exception as e:
+            return {"error": f"RLM query failed - {e}"}
+
+        with self.lock:
+            self.pending_calls.append(completion)
+        return {"response": completion.response}
+
+    def _handle_recursive_batched(self, body: dict) -> dict:
+        if self.subcall_fn is None:
+            return self._handle_batched(body)
+
+        results = []
+        for prompt in body.get("prompts", []):
+            try:
+                completion = self.subcall_fn(prompt, body.get("model"))
+            except Exception as e:
+                results.append(f"Error: RLM query failed - {e}")
+                continue
+
+            with self.lock:
+                self.pending_calls.append(completion)
+            results.append(completion.response)
+        return {"responses": results}
+
+
+def _build_exec_script(
+    code: str, proxy_port: int, depth: int = 1, mcp_config: dict | None = None
+) -> str:
     """Build execution script for the container."""
     code_b64 = base64.b64encode(code.encode()).decode()
+
+    mcp_setup = ""
+    if mcp_config:
+        mcp_setup = generate_mcp_init_code(mcp_config, globals_target="globals")
 
     return textwrap.dedent(
         f'''
@@ -103,9 +146,13 @@ except ImportError:
 PROXY = "http://host.docker.internal:{proxy_port}"
 STATE = "/workspace/state.dill"
 
+{mcp_setup}
+
 def llm_query(prompt, model=None):
     try:
-        r = requests.post(f"{{PROXY}}/llm_query", json={{"prompt": prompt, "model": model, "depth": {depth}}}, timeout=300)
+        r = requests.post(f"{{PROXY}}/llm_query", json={{"prompt": prompt, "model": model, "depth": {
+            depth
+        }}}, timeout=300)
         d = r.json()
         return d.get("response") or f"Error: {{d.get('error')}}"
     except Exception as e:
@@ -113,7 +160,25 @@ def llm_query(prompt, model=None):
 
 def llm_query_batched(prompts, model=None):
     try:
-        r = requests.post(f"{{PROXY}}/llm_query_batched", json={{"prompts": prompts, "model": model, "depth": {depth}}}, timeout=300)
+        r = requests.post(f"{{PROXY}}/llm_query_batched", json={{"prompts": prompts, "model": model, "depth": {
+            depth
+        }}}, timeout=300)
+        d = r.json()
+        return d.get("responses") or [f"Error: {{d.get('error')}}"] * len(prompts)
+    except Exception as e:
+        return [f"Error: {{e}}"] * len(prompts)
+
+def rlm_query(prompt, model=None):
+    try:
+        r = requests.post(f"{{PROXY}}/rlm_query", json={{"prompt": prompt, "model": model}}, timeout=300)
+        d = r.json()
+        return d.get("response") or f"Error: {{d.get('error')}}"
+    except Exception as e:
+        return f"Error: {{e}}"
+
+def rlm_query_batched(prompts, model=None):
+    try:
+        r = requests.post(f"{{PROXY}}/rlm_query_batched", json={{"prompts": prompts, "model": model}}, timeout=300)
         d = r.json()
         return d.get("responses") or [f"Error: {{d.get('error')}}"] * len(prompts)
     except Exception as e:
@@ -155,8 +220,16 @@ def SHOW_VARS():
         return "No variables created yet. Use ```repl``` blocks to create variables."
     return f"Available variables: {{available}}"
 
-_globals = {{"__builtins__": __builtins__, "__name__": "__main__", "llm_query": llm_query, "llm_query_batched": llm_query_batched, "FINAL_VAR": FINAL_VAR, "SHOW_VARS": SHOW_VARS}}
+_globals = {{"__builtins__": __builtins__, "__name__": "__main__", "llm_query": llm_query, "llm_query_batched": llm_query_batched, "rlm_query": rlm_query, "rlm_query_batched": rlm_query_batched, "FINAL_VAR": FINAL_VAR, "SHOW_VARS": SHOW_VARS}}
 
+{
+            """for _tool_name in _mcp_tools.keys():
+    if _tool_name in globals():
+        _globals[_tool_name] = globals()[_tool_name]
+"""
+            if mcp_config
+            else ""
+        }
 code = base64.b64decode("{code_b64}").decode()
 stdout_buf, stderr_buf = io.StringIO(), io.StringIO()
 old_stdout, old_stderr = sys.stdout, sys.stderr
@@ -179,7 +252,12 @@ if "context_0" in _locals:
 if "history_0" in _locals:
     _locals["history"] = _locals["history_0"]
 
-save_state(_locals)
+{
+            """_cleanup_mcp()
+"""
+            if mcp_config
+            else ""
+        }save_state(_locals)
 print(json.dumps({{"stdout": stdout_buf.getvalue(), "stderr": stderr_buf.getvalue(), "locals": {{k: repr(v) for k, v in _locals.items() if not k.startswith("_")}}}}, ensure_ascii=False))
 '''
     )
@@ -200,6 +278,9 @@ class DockerREPL(NonIsolatedEnv):
         setup_code: str | None = None,
         persistent: bool = False,
         depth: int = 1,
+        subcall_fn: Callable[[str, str | None], RLMChatCompletion] | None = None,
+        mcp_servers: dict[str, dict] | None = None,
+        volumes: dict[str, str] | None = None,
         **kwargs,
     ):
         if persistent:
@@ -210,10 +291,14 @@ class DockerREPL(NonIsolatedEnv):
 
         self.image = image
         self.lm_handler_address = lm_handler_address
+        self.subcall_fn = subcall_fn
         self.container_id: str | None = None
         self.proxy_server: HTTPServer | None = None
         self.proxy_thread: threading.Thread | None = None
         self.proxy_port: int = 0
+        self.mcp_servers = mcp_servers
+        self.volumes = volumes or {}
+        self.mcp_config_path: str | None = None
         base_dir = os.environ.get(
             "RLM_DOCKER_WORKSPACE_DIR", os.path.join(os.getcwd(), ".rlm_workspace")
         )
@@ -240,6 +325,7 @@ class DockerREPL(NonIsolatedEnv):
                 "pending_calls": self.pending_calls,
                 "lock": self._calls_lock,
                 "depth": self.depth,
+                "subcall_fn": self.subcall_fn,
             },
         )
         self.proxy_server = HTTPServer(("127.0.0.1", 0), handler)
@@ -248,6 +334,9 @@ class DockerREPL(NonIsolatedEnv):
         self.proxy_thread.start()
 
         # Start Docker container
+        extra_volumes = []
+        for host_path, container_path in self.volumes.items():
+            extra_volumes += ["-v", f"{host_path}:{container_path}"]
         result = subprocess.run(
             [
                 "docker",
@@ -256,6 +345,7 @@ class DockerREPL(NonIsolatedEnv):
                 "--rm",
                 "-v",
                 f"{self.temp_dir}:/workspace",
+                *extra_volumes,
                 "--add-host",
                 "host.docker.internal:host-gateway",
                 self.image,
@@ -273,9 +363,69 @@ class DockerREPL(NonIsolatedEnv):
 
         # Install dependencies
         subprocess.run(
-            ["docker", "exec", self.container_id, "pip", "install", "-q", "dill", "requests"],
+            [
+                "docker",
+                "exec",
+                self.container_id,
+                "pip",
+                "install",
+                "-q",
+                "dill",
+                "requests",
+                "mcp",
+                "uv",
+            ],
             capture_output=True,
         )
+
+        # Pre-install uvx-based MCP tools to avoid download noise at execution time
+        if self.mcp_servers:
+            for _config in self.mcp_servers.values():
+                if _config.get("type", "stdio") == "stdio" and _config.get("command") == "uvx":
+                    _args = _config.get("args", [])
+                    if _args:
+                        subprocess.run(
+                            [
+                                "docker",
+                                "exec",
+                                self.container_id,
+                                "uv",
+                                "tool",
+                                "install",
+                                _args[0],
+                            ],
+                            capture_output=True,
+                        )
+
+        # Install Node.js and pre-install npx-based MCP packages globally
+        if self.mcp_servers and any(
+            c.get("type", "stdio") == "stdio" and c.get("command") == "npx"
+            for c in self.mcp_servers.values()
+        ):
+            subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    self.container_id,
+                    "sh",
+                    "-c",
+                    "apt-get update -qq && apt-get install -y -q nodejs npm",
+                ],
+                capture_output=True,
+            )
+            for _config in self.mcp_servers.values():
+                if _config.get("type", "stdio") == "stdio" and _config.get("command") == "npx":
+                    _args = _config.get("args", [])
+                    _pkg = next((a for a in _args if not a.startswith("-")), None)
+                    if _pkg:
+                        subprocess.run(
+                            ["docker", "exec", self.container_id, "npm", "install", "-g", _pkg],
+                            capture_output=True,
+                        )
+
+        # Start MCP servers in container if provided
+        if self.mcp_servers:
+            self._start_mcp_servers_in_container()
 
     def load_context(self, context_payload: dict | list | str):
         """Load context by writing to a file in the mounted workspace."""
@@ -300,7 +450,7 @@ class DockerREPL(NonIsolatedEnv):
         with self._calls_lock:
             self.pending_calls.clear()
 
-        script = _build_exec_script(code, self.proxy_port, self.depth)
+        script = _build_exec_script(code, self.proxy_port, self.depth, self.mcp_servers)
         result = subprocess.run(
             ["docker", "exec", self.container_id, "python", "-c", script],
             capture_output=True,
@@ -330,7 +480,60 @@ class DockerREPL(NonIsolatedEnv):
                 rlm_calls=calls,
             )
 
+    def _start_mcp_servers_in_container(self):
+        """Start MCP servers inside the Docker container."""
+        if not self.container_id:
+            raise RuntimeError("Container not started")
+
+        for server_name, config in self.mcp_servers.items():
+            server_type = config.get("type", "stdio")
+
+            if server_type == "stdio":
+                command = config.get("command")
+                args = config.get("args", [])
+
+                if not command:
+                    raise ValueError(f"MCP server '{server_name}' requires 'command' in config")
+
+                args_str = " ".join(f"'{arg}'" for arg in args)
+                full_cmd = f"{command} {args_str}"
+
+                result = subprocess.run(
+                    [
+                        "docker",
+                        "exec",
+                        "-d",
+                        self.container_id,
+                        "sh",
+                        "-c",
+                        f"nohup {full_cmd} > /tmp/mcp_{server_name}.log 2>&1 & echo $!",
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"Failed to start MCP server '{server_name}': {result.stderr}"
+                    )
+
+                pid = result.stdout.strip()
+                if not hasattr(self, "_mcp_pids"):
+                    self._mcp_pids = {}
+                self._mcp_pids[server_name] = pid
+
+            elif server_type in ("streamable-http", "sse"):
+                pass
+
     def cleanup(self):
+        if hasattr(self, "_mcp_pids") and self._mcp_pids:
+            for _server_name, pid in self._mcp_pids.items():
+                subprocess.run(
+                    ["docker", "exec", self.container_id, "kill", pid],
+                    capture_output=True,
+                )
+            self._mcp_pids.clear()
+
         if hasattr(self, "container_id") and self.container_id:
             subprocess.run(["docker", "stop", self.container_id], capture_output=True)
             self.container_id = None
