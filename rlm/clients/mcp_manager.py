@@ -30,26 +30,45 @@ class MCPClientManager:
         self._tools: dict[str, MCPToolInfo] = {}
         self._exit_stack: AsyncExitStack | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._lifecycle_task: asyncio.Task[None] | None = None
+        self._ready_event: asyncio.Event | None = None
+        self._shutdown_event: asyncio.Event | None = None
 
     def connect_all(self) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._exit_stack = AsyncExitStack()
+        self._ready_event = asyncio.Event()
+        self._shutdown_event = asyncio.Event()
+        self._lifecycle_task = self._loop.create_task(self._run_lifecycle())
+        self._loop.run_until_complete(self._ready_event.wait())
 
-        async def connect_all_async() -> None:
-            for name, config in self._configs.items():
-                await self._connect_server_async(name, config)
+        if self._lifecycle_task.done():
+            self._lifecycle_task.result()
 
-        self._loop.run_until_complete(connect_all_async())
+    async def _run_lifecycle(self) -> None:
+        try:
+            async with AsyncExitStack() as exit_stack:
+                self._exit_stack = exit_stack
+                for name, config in self._configs.items():
+                    await self._connect_server_async(name, config)
+                self._ready_event.set()
+                await self._shutdown_event.wait()
+        finally:
+            self._ready_event.set()
 
     def disconnect_all(self) -> None:
-        if self._exit_stack is not None:
+        if self._lifecycle_task is not None and not self._lifecycle_task.done():
+            self._shutdown_event.set()
             try:
-                self._loop.run_until_complete(self._exit_stack.aclose())
+                self._loop.run_until_complete(self._lifecycle_task)
             except Exception:
                 pass
-            self._exit_stack = None
+        self._lifecycle_task = None
+        self._ready_event = None
+        self._shutdown_event = None
+        self._exit_stack = None
         if self._loop is not None:
+            self._loop.run_until_complete(self._loop.shutdown_asyncgens())
             self._loop.close()
             self._loop = None
         self._sessions.clear()
@@ -120,13 +139,13 @@ class MCPClientManager:
         if not url:
             raise ValueError(f"MCP server {name} requires 'url' for HTTP transport")
 
-        async with streamable_http_client(url) as (read, write, _):
-            session = await self._exit_stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
-            self._sessions[name] = session
+        read, write, _ = await self._exit_stack.enter_async_context(streamable_http_client(url))
+        session = await self._exit_stack.enter_async_context(ClientSession(read, write))
+        await session.initialize()
+        self._sessions[name] = session
 
-            tools_result = await session.list_tools()
-            self._register_tools(name, tools_result)
+        tools_result = await session.list_tools()
+        self._register_tools(name, tools_result)
 
     def _register_tools(self, server_name: str, tools_result: types.ListToolsResult) -> None:
         for tool in tools_result.tools:

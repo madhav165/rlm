@@ -4,7 +4,10 @@ Integration tests for MCP tools in REPL.
 Run with: uv run pytest tests/repl/test_mcp_tools.py -v
 """
 
+import asyncio
 import importlib.util
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -108,6 +111,44 @@ class TestMCPClientManager:
         assert "Unknown tool" in str(exc_info.value)
 
         manager.disconnect_all()
+
+    def test_streamable_http_transport_closes_in_owning_task(self):
+        class TrackingContext:
+            def __init__(self, value):
+                self.value = value
+                self.owner = None
+                self.exited = False
+
+            async def __aenter__(self):
+                self.owner = asyncio.current_task()
+                return self.value
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                assert asyncio.current_task() is self.owner
+                self.exited = True
+
+        transport = TrackingContext((object(), object(), None))
+        session = SimpleNamespace(
+            initialize=AsyncMock(),
+            list_tools=AsyncMock(return_value=SimpleNamespace(tools=[])),
+        )
+        session_context = TrackingContext(session)
+
+        with (
+            patch(
+                "rlm.clients.mcp_manager.streamable_http_client",
+                return_value=transport,
+            ),
+            patch("rlm.clients.mcp_manager.ClientSession", return_value=session_context),
+        ):
+            manager = MCPClientManager(
+                {"remote": {"type": "streamable-http", "url": "https://example.com/mcp"}}
+            )
+            manager.connect_all()
+            manager.disconnect_all()
+
+        assert transport.exited
+        assert session_context.exited
 
 
 class TestMCPToolsInREPL:
