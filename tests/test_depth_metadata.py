@@ -132,6 +132,29 @@ class TestDepth1CompletionLoop:
                 assert "subcall_fn" in env_kwargs
                 assert env_kwargs["subcall_fn"] is not None
 
+    def test_subcall_fn_passed_to_docker_environment(self):
+        """Docker receives the host callback needed by its recursive proxy routes."""
+        with patch.object(rlm_module, "get_client") as mock_get_client:
+            mock_lm = create_mock_lm(["FINAL(done)"])
+            mock_get_client.return_value = mock_lm
+
+            rlm = RLM(
+                backend="openai",
+                backend_kwargs={"model_name": "test-model"},
+                environment="docker",
+                max_depth=2,
+            )
+
+            with patch.object(rlm_module, "get_environment") as mock_get_env:
+                mock_get_env.side_effect = RuntimeError("captured")
+                try:
+                    rlm.completion("test")
+                except RuntimeError:
+                    pass
+
+                env_kwargs = mock_get_env.call_args.args[1]
+                assert env_kwargs["subcall_fn"] is not None
+
 
 class TestDepth1LimitChecks:
     """Verify limit checks work correctly in the refactored helpers."""

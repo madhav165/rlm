@@ -239,8 +239,8 @@ class RLM:
             env_kwargs["lm_handler_address"] = (lm_handler.host, lm_handler.port)
             env_kwargs["context_payload"] = prompt
             env_kwargs["depth"] = self.depth + 1  # Environment depth is RLM depth + 1
-            # For local environment with max_depth > 1, pass subcall callback for recursive RLM calls
-            if self.environment_type == "local" and self.max_depth > 1:
+            # Environments with a host callback can spawn recursive RLM calls.
+            if self.environment_type in ("local", "docker") and self.max_depth > 1:
                 env_kwargs["subcall_fn"] = self._subcall
             # Pass custom tools to the environment
             if self.custom_tools is not None:
@@ -796,6 +796,7 @@ class RLM:
             # Propagate custom tools to children (sub_tools become the child's tools)
             custom_tools=self.custom_sub_tools,
             custom_sub_tools=self.custom_sub_tools,
+            mcp_servers=self.mcp_servers,
             # Propagate callbacks to children for nested tracking
             on_subcall_start=self.on_subcall_start,
             on_subcall_complete=self.on_subcall_complete,

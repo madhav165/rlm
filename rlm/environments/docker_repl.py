@@ -15,6 +15,7 @@ import tempfile
 import textwrap
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from rlm.core.comms_utils import LMRequest, send_lm_request, send_lm_request_batched
@@ -30,6 +31,7 @@ class LLMProxyHandler(BaseHTTPRequestHandler):
     pending_calls: list[RLMChatCompletion] = []
     lock: threading.Lock = threading.Lock()
     depth: int = 1
+    subcall_fn: Callable[[str, str | None], RLMChatCompletion] | None = None
 
     def log_message(self, *args):
         pass
@@ -41,6 +43,10 @@ class LLMProxyHandler(BaseHTTPRequestHandler):
             result = self._handle_single(body)
         elif self.path == "/llm_query_batched":
             result = self._handle_batched(body)
+        elif self.path == "/rlm_query":
+            result = self._handle_recursive(body)
+        elif self.path == "/rlm_query_batched":
+            result = self._handle_recursive_batched(body)
         else:
             self._respond(404, {"error": "Not found"})
             return
@@ -88,6 +94,36 @@ class LLMProxyHandler(BaseHTTPRequestHandler):
 
         return {"responses": results}
 
+    def _handle_recursive(self, body: dict) -> dict:
+        if self.subcall_fn is None:
+            return self._handle_single(body)
+
+        try:
+            completion = self.subcall_fn(body.get("prompt"), body.get("model"))
+        except Exception as e:
+            return {"error": f"RLM query failed - {e}"}
+
+        with self.lock:
+            self.pending_calls.append(completion)
+        return {"response": completion.response}
+
+    def _handle_recursive_batched(self, body: dict) -> dict:
+        if self.subcall_fn is None:
+            return self._handle_batched(body)
+
+        results = []
+        for prompt in body.get("prompts", []):
+            try:
+                completion = self.subcall_fn(prompt, body.get("model"))
+            except Exception as e:
+                results.append(f"Error: RLM query failed - {e}")
+                continue
+
+            with self.lock:
+                self.pending_calls.append(completion)
+            results.append(completion.response)
+        return {"responses": results}
+
 
 def _build_exec_script(
     code: str, proxy_port: int, depth: int = 1, mcp_config: dict | None = None
@@ -132,6 +168,22 @@ def llm_query_batched(prompts, model=None):
     except Exception as e:
         return [f"Error: {{e}}"] * len(prompts)
 
+def rlm_query(prompt, model=None):
+    try:
+        r = requests.post(f"{{PROXY}}/rlm_query", json={{"prompt": prompt, "model": model}}, timeout=300)
+        d = r.json()
+        return d.get("response") or f"Error: {{d.get('error')}}"
+    except Exception as e:
+        return f"Error: {{e}}"
+
+def rlm_query_batched(prompts, model=None):
+    try:
+        r = requests.post(f"{{PROXY}}/rlm_query_batched", json={{"prompts": prompts, "model": model}}, timeout=300)
+        d = r.json()
+        return d.get("responses") or [f"Error: {{d.get('error')}}"] * len(prompts)
+    except Exception as e:
+        return [f"Error: {{e}}"] * len(prompts)
+
 def load_state():
     if os.path.exists(STATE):
         try:
@@ -168,7 +220,7 @@ def SHOW_VARS():
         return "No variables created yet. Use ```repl``` blocks to create variables."
     return f"Available variables: {{available}}"
 
-_globals = {{"__builtins__": __builtins__, "__name__": "__main__", "llm_query": llm_query, "llm_query_batched": llm_query_batched, "FINAL_VAR": FINAL_VAR, "SHOW_VARS": SHOW_VARS}}
+_globals = {{"__builtins__": __builtins__, "__name__": "__main__", "llm_query": llm_query, "llm_query_batched": llm_query_batched, "rlm_query": rlm_query, "rlm_query_batched": rlm_query_batched, "FINAL_VAR": FINAL_VAR, "SHOW_VARS": SHOW_VARS}}
 
 {
             """for _tool_name in _mcp_tools.keys():
@@ -226,6 +278,7 @@ class DockerREPL(NonIsolatedEnv):
         setup_code: str | None = None,
         persistent: bool = False,
         depth: int = 1,
+        subcall_fn: Callable[[str, str | None], RLMChatCompletion] | None = None,
         mcp_servers: dict[str, dict] | None = None,
         volumes: dict[str, str] | None = None,
         **kwargs,
@@ -238,6 +291,7 @@ class DockerREPL(NonIsolatedEnv):
 
         self.image = image
         self.lm_handler_address = lm_handler_address
+        self.subcall_fn = subcall_fn
         self.container_id: str | None = None
         self.proxy_server: HTTPServer | None = None
         self.proxy_thread: threading.Thread | None = None
@@ -271,6 +325,7 @@ class DockerREPL(NonIsolatedEnv):
                 "pending_calls": self.pending_calls,
                 "lock": self._calls_lock,
                 "depth": self.depth,
+                "subcall_fn": self.subcall_fn,
             },
         )
         self.proxy_server = HTTPServer(("127.0.0.1", 0), handler)
